@@ -1,0 +1,31 @@
+from html import escape
+
+from aiogram import F, Router
+from aiogram.types import Message
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.repositories.plans import PlansRepository
+from app.utils.money import format_toman
+from bot import texts
+
+router = Router(name="tariffs")
+
+
+@router.message(F.text == texts.BTN_TARIFFS)
+async def tariffs(message: Message, session: AsyncSession) -> None:
+    plans = await PlansRepository(session).list_active()
+    if not plans:
+        await message.answer("در حال حاضر تعرفه‌ای ثبت نشده است.")
+        return
+
+    lines = ["💰 تعرفه اشتراک‌ها:"]
+    for plan in plans:
+        lines.append(
+            f"""
+{escape(plan.title)}
+📦 حجم: {plan.volume_gb} گیگ
+🗓 مدت اعتبار: {plan.duration_days} روز
+💵 قیمت: {format_toman(plan.price)} تومان"""
+        )
+
+    await message.answer("\n".join(lines))
