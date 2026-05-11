@@ -8,12 +8,13 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.models import OrderStatus, PaymentStatus
+from app.models import OrderKind, OrderStatus
 from app.repositories.orders import OrdersRepository
 from app.repositories.payments import PaymentsRepository
 from app.repositories.plans import PlansRepository
 from app.repositories.users import UsersRepository
 from app.services.order_service import OrderService
+from app.services.order_status import order_kind_label
 from app.services.payment_service import PaymentService
 from app.services.username_validator import validate_username
 from app.services.vpn_panel import VPNPanelService
@@ -78,7 +79,7 @@ async def show_pre_invoice(
         user = await UsersRepository(session).get_by_telegram_id(callback.from_user.id)
 
     wallet_balance = user.wallet_balance if user else 0
-    text = f"""🧾 پیش فاکتور شما:
+    text = f"""🧾 پیش‌فاکتور خرید اشتراک
 
 🔐 نام کاربری: در مرحله بعد وارد می‌شود
 ⚡ نام سرویس: {escape(plan.title)}
@@ -230,11 +231,11 @@ async def receive_receipt_photo(
         return
 
     receipt_file_id = message.photo[-1].file_id
-    await PaymentService(session, VPNPanelService()).attach_receipt(payment, receipt_file_id)
+    await PaymentService(session, VPNPanelService(), settings).attach_receipt(payment, receipt_file_id)
     await state.clear()
 
     await message.answer("✅ رسید شما دریافت شد و در انتظار تایید ادمین است.")
-    await _notify_admins_about_payment(message, settings, payment.id, receipt_file_id, order)
+    await _notify_admins_about_payment(message, settings, session, payment.id, receipt_file_id, order)
 
 
 @router.message(BuyStates.waiting_receipt)
@@ -245,19 +246,27 @@ async def receive_non_photo_receipt(message: Message) -> None:
 async def _notify_admins_about_payment(
     message: Message,
     settings: Settings,
+    session: AsyncSession,
     payment_id: int,
     receipt_file_id: str,
     order,
 ) -> None:
     username = f"@{order.user.telegram_username}" if order.user.telegram_username else "بدون یوزرنیم تلگرام"
+    order_kind = order_kind_label(order.order_kind)
+    service_username_label = "نام کاربری سرویس"
+    if order.order_kind == OrderKind.RENEWAL.value:
+        service_username_label = "سرویس تمدیدی"
     caption = f"""🧾 پرداخت جدید در انتظار تایید
 
 👤 کاربر: {escape(order.user.first_name or "-")} / {escape(username)}
 🛒 کد پیگیری: {order.tracking_code}
+⚡ نوع سفارش: {order_kind}
 💵 مبلغ: {format_toman(order.amount)} تومان
 ⚡ پلن: {escape(order.plan.title)}
-🔐 نام کاربری سرویس: {escape(order.custom_username or "-")}"""
-    for admin_id in settings.admin_ids:
+🔐 {service_username_label}: {escape(order.custom_username or "-")}"""
+    admin_ids = set(settings.admin_ids)
+    admin_ids.update(await UsersRepository(session).list_admin_telegram_ids())
+    for admin_id in admin_ids:
         try:
             await message.bot.send_photo(
                 chat_id=admin_id,

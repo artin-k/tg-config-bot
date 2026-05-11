@@ -18,6 +18,7 @@ class PaymentsRepository:
             .options(
                 joinedload(Payment.user),
                 joinedload(Payment.order).joinedload(Order.plan),
+                joinedload(Payment.order).joinedload(Order.renewal_service),
             )
             .where(Payment.id == payment_id)
         )
@@ -31,6 +32,7 @@ class PaymentsRepository:
             .options(
                 joinedload(Payment.user),
                 joinedload(Payment.order).joinedload(Order.plan),
+                joinedload(Payment.order).joinedload(Order.renewal_service),
             )
             .where(
                 Payment.status == PaymentStatus.PENDING.value,

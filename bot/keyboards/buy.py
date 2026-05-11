@@ -23,10 +23,14 @@ class PaymentCallback(CallbackData, prefix="pay"):
 
 
 def plans_keyboard(plans: list[Plan]) -> InlineKeyboardMarkup:
+    return plans_inline_keyboard(plans)
+
+
+def plans_inline_keyboard(plans: list[Plan]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for plan in plans:
         builder.button(
-            text=f"{plan.title} | حجم: {plan.volume_gb} گیگ | {format_toman(plan.price)} تومان",
+            text=f"{plan.title} | {plan.volume_gb} گیگ | {format_toman(plan.price)} تومان",
             callback_data=PlanCallback(plan_id=plan.id),
         )
     builder.button(text=texts.BTN_BACK, callback_data=BUY_BACK_TO_MENU)
@@ -44,6 +48,6 @@ def pre_invoice_keyboard(plan_id: int) -> InlineKeyboardMarkup:
 
 def payment_keyboard(order_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="پرداخت ↗️", callback_data=PaymentCallback(order_id=order_id))
+    builder.button(text="✅ تایید و پرداخت", callback_data=PaymentCallback(order_id=order_id))
     builder.adjust(1)
     return builder.as_markup()

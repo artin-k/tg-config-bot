@@ -5,9 +5,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
-from app.models import Order, OrderStatus, Payment, PaymentStatus, VPNServiceStatus
+from app.config import Settings
+from app.models import Order, OrderKind, OrderStatus, Payment, PaymentStatus, VPNServiceStatus
 from app.repositories.services import ServicesRepository
 from app.services.order_service import OrderService
+from app.services.referral_service import ReferralService
+from app.services.renewal_service import RenewalService
 from app.services.vpn_panel import VPNPanelService
 
 
@@ -26,12 +29,14 @@ class PaymentAlreadyProcessedError(PaymentApprovalError):
 @dataclass(frozen=True)
 class ApprovedPaymentResult:
     user_telegram_id: int
-    custom_username: str
+    order_kind: str
+    service_username: str
     plan_title: str
     volume_gb: int
     duration_days: int
-    config_link: str
-    subscription_link: str
+    config_link: str | None
+    subscription_link: str | None
+    new_expire_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -40,9 +45,10 @@ class RejectedPaymentResult:
 
 
 class PaymentService:
-    def __init__(self, session: AsyncSession, vpn_panel: VPNPanelService) -> None:
+    def __init__(self, session: AsyncSession, vpn_panel: VPNPanelService, settings: Settings | None = None) -> None:
         self.session = session
         self.vpn_panel = vpn_panel
+        self.settings = settings
 
     async def attach_receipt(self, payment: Payment, receipt_file_id: str) -> None:
         payment.receipt_file_id = receipt_file_id
@@ -61,12 +67,10 @@ class PaymentService:
             payment.status = PaymentStatus.EXPIRED.value
             await self.session.commit()
             raise PaymentExpiredError("Order expired")
+        if order.order_kind == OrderKind.RENEWAL.value and order.renewal_service is None:
+            raise PaymentApprovalError("Renewal service not found")
 
         now = datetime.now(timezone.utc)
-        plan = order.plan
-        user = order.user
-        username = order.custom_username or f"user{user.telegram_id}"
-
         payment.status = PaymentStatus.APPROVED.value
         payment.verified_at = now
         order.status = OrderStatus.PAID.value
@@ -74,39 +78,13 @@ class PaymentService:
         await self.session.flush()
 
         order.status = OrderStatus.CREATING_SERVICE.value
-        provisioned = await self.vpn_panel.provision_user(
-            username=username,
-            volume_gb=plan.volume_gb,
-            duration_days=plan.duration_days,
-        )
-
-        services = ServicesRepository(self.session)
-        await services.create(
-            user_id=user.id,
-            order_id=order.id,
-            plan_id=plan.id,
-            username=username,
-            config_link=provisioned.config_link,
-            subscription_link=provisioned.subscription_link,
-            volume_gb=plan.volume_gb,
-            duration_days=plan.duration_days,
-            expire_at=now + timedelta(days=plan.duration_days),
-            status=VPNServiceStatus.ACTIVE.value,
-        )
+        result = await self._complete_order(order, now)
 
         order.status = OrderStatus.COMPLETED.value
         order.completed_at = now
         await self.session.commit()
 
-        return ApprovedPaymentResult(
-            user_telegram_id=user.telegram_id,
-            custom_username=username,
-            plan_title=plan.title,
-            volume_gb=plan.volume_gb,
-            duration_days=plan.duration_days,
-            config_link=provisioned.config_link,
-            subscription_link=provisioned.subscription_link,
-        )
+        return result
 
     async def reject_payment(self, payment_id: int) -> RejectedPaymentResult:
         payment = await self._load_payment_for_update(payment_id)
@@ -128,6 +106,7 @@ class PaymentService:
                 joinedload(Payment.user),
                 joinedload(Payment.order).joinedload(Order.user),
                 joinedload(Payment.order).joinedload(Order.plan),
+                joinedload(Payment.order).joinedload(Order.renewal_service),
             )
             .where(Payment.id == payment_id)
             .with_for_update(of=Payment)
@@ -138,3 +117,76 @@ class PaymentService:
         if payment.receipt_file_id:
             return False
         return OrderService.is_order_expired(order)
+
+    async def _complete_order(self, order: Order, now: datetime) -> ApprovedPaymentResult:
+        if order.order_kind == OrderKind.RENEWAL.value:
+            return await self._complete_renewal(order, now)
+        return await self._complete_purchase(order, now)
+
+    async def _complete_purchase(self, order: Order, now: datetime) -> ApprovedPaymentResult:
+        plan = order.plan
+        user = order.user
+        username = order.custom_username or f"user{user.telegram_id}"
+
+        provisioned = await self.vpn_panel.provision_user(
+            username=username,
+            volume_gb=plan.volume_gb,
+            duration_days=plan.duration_days,
+        )
+
+        services = ServicesRepository(self.session)
+        await services.create(
+            user_id=user.id,
+            order_id=order.id,
+            plan_id=plan.id,
+            username=username,
+            config_link=provisioned.config_link,
+            subscription_link=provisioned.subscription_link,
+            volume_gb=plan.volume_gb,
+            duration_days=plan.duration_days,
+            expire_at=now + timedelta(days=plan.duration_days),
+            status=VPNServiceStatus.ACTIVE.value,
+        )
+
+        reward_amount = self.settings.referral_reward_amount if self.settings else 0
+        await ReferralService(self.session).grant_first_purchase_reward(
+            user=user,
+            order=order,
+            amount=reward_amount,
+        )
+
+        return ApprovedPaymentResult(
+            user_telegram_id=user.telegram_id,
+            order_kind=OrderKind.PURCHASE.value,
+            service_username=username,
+            plan_title=plan.title,
+            volume_gb=plan.volume_gb,
+            duration_days=plan.duration_days,
+            config_link=provisioned.config_link,
+            subscription_link=provisioned.subscription_link,
+        )
+
+    async def _complete_renewal(self, order: Order, now: datetime) -> ApprovedPaymentResult:
+        plan = order.plan
+        user = order.user
+        service = order.renewal_service
+        if service is None:
+            raise PaymentApprovalError("Renewal service not found")
+
+        new_expire_at = await RenewalService(self.vpn_panel).extend_service(
+            service=service,
+            plan=plan,
+            now=now,
+        )
+
+        return ApprovedPaymentResult(
+            user_telegram_id=user.telegram_id,
+            order_kind=OrderKind.RENEWAL.value,
+            service_username=service.username,
+            plan_title=plan.title,
+            volume_gb=plan.volume_gb,
+            duration_days=plan.duration_days,
+            config_link=service.config_link,
+            subscription_link=service.subscription_link,
+            new_expire_at=new_expire_at,
+        )

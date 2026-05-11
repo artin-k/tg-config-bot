@@ -21,6 +21,7 @@ class Settings(BaseSettings):
         alias="PAYMENT_DESCRIPTION",
     )
     order_expire_minutes: int = Field(default=15, alias="ORDER_EXPIRE_MINUTES")
+    referral_reward_amount: int = Field(default=0, alias="REFERRAL_REWARD_AMOUNT")
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -50,3 +50,10 @@ class ServicesRepository:
             .order_by(VPNService.expire_at.desc())
         )
         return list(result.unique().all())
+
+    async def get_user_service(self, service_id: int, user_id: int) -> VPNService | None:
+        return await self.session.scalar(
+            select(VPNService)
+            .options(joinedload(VPNService.plan))
+            .where(VPNService.id == service_id, VPNService.user_id == user_id)
+        )

@@ -1,7 +1,7 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Plan
+from app.models import Order, Plan, VPNService
 
 
 class PlansRepository:
@@ -54,3 +54,27 @@ class PlansRepository:
         plan.is_active = is_active
         await self.session.flush()
         return plan
+
+    async def update_fields(self, plan_id: int, **fields) -> Plan | None:
+        plan = await self.get(plan_id)
+        if plan is None:
+            return None
+        for key, value in fields.items():
+            setattr(plan, key, value)
+        await self.session.flush()
+        return plan
+
+    async def has_usage(self, plan_id: int) -> bool:
+        orders_count = await self.session.scalar(select(func.count()).select_from(Order).where(Order.plan_id == plan_id))
+        services_count = await self.session.scalar(
+            select(func.count()).select_from(VPNService).where(VPNService.plan_id == plan_id)
+        )
+        return bool((orders_count or 0) > 0 or (services_count or 0) > 0)
+
+    async def delete(self, plan_id: int) -> bool:
+        plan = await self.get(plan_id)
+        if plan is None:
+            return False
+        await self.session.delete(plan)
+        await self.session.flush()
+        return True

@@ -20,6 +20,11 @@ class OrderStatus(str, Enum):
     FAILED = "failed"
 
 
+class OrderKind(str, Enum):
+    PURCHASE = "purchase"
+    RENEWAL = "renewal"
+
+
 class PaymentStatus(str, Enum):
     PENDING = "pending"
     APPROVED = "approved"
@@ -63,6 +68,15 @@ class User(TimestampMixin, Base):
     orders: Mapped[list[Order]] = relationship(back_populates="user")
     payments: Mapped[list[Payment]] = relationship(back_populates="user")
     services: Mapped[list[VPNService]] = relationship(back_populates="user")
+    referral_rewards_sent: Mapped[list[ReferralReward]] = relationship(
+        back_populates="referrer",
+        foreign_keys="ReferralReward.referrer_id",
+    )
+    referral_reward_received: Mapped[ReferralReward | None] = relationship(
+        back_populates="referred_user",
+        foreign_keys="ReferralReward.referred_user_id",
+        uselist=False,
+    )
 
 
 class Plan(TimestampMixin, Base):
@@ -88,6 +102,13 @@ class Order(TimestampMixin, Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     plan_id: Mapped[int] = mapped_column(ForeignKey("plans.id", ondelete="RESTRICT"), index=True, nullable=False)
     custom_username: Mapped[str | None] = mapped_column(String(64))
+    order_kind: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=OrderKind.PURCHASE.value,
+        server_default=OrderKind.PURCHASE.value,
+    )
+    service_id: Mapped[int | None] = mapped_column(ForeignKey("vpn_services.id", ondelete="SET NULL"), index=True)
     tracking_code: Mapped[str] = mapped_column(String(32), unique=True, index=True, nullable=False)
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(
@@ -103,7 +124,14 @@ class Order(TimestampMixin, Base):
     user: Mapped[User] = relationship(back_populates="orders")
     plan: Mapped[Plan] = relationship(back_populates="orders")
     payment: Mapped[Payment | None] = relationship(back_populates="order", uselist=False)
-    vpn_service: Mapped[VPNService | None] = relationship(back_populates="order", uselist=False)
+    vpn_service: Mapped[VPNService | None] = relationship(
+        back_populates="order",
+        uselist=False,
+        foreign_keys="VPNService.order_id",
+    )
+    renewal_service: Mapped[VPNService | None] = relationship(
+        foreign_keys=[service_id],
+    )
 
 
 class Payment(TimestampMixin, Base):
@@ -160,5 +188,30 @@ class VPNService(TimestampMixin, Base):
     )
 
     user: Mapped[User] = relationship(back_populates="services")
-    order: Mapped[Order] = relationship(back_populates="vpn_service")
+    order: Mapped[Order] = relationship(back_populates="vpn_service", foreign_keys=[order_id])
     plan: Mapped[Plan] = relationship(back_populates="services")
+
+
+class ReferralReward(TimestampMixin, Base):
+    __tablename__ = "referral_rewards"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    referrer_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    referred_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), unique=True, index=True, nullable=False)
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    referrer: Mapped[User] = relationship(
+        back_populates="referral_rewards_sent",
+        foreign_keys=[referrer_id],
+    )
+    referred_user: Mapped[User] = relationship(
+        back_populates="referral_reward_received",
+        foreign_keys=[referred_user_id],
+    )
+    order: Mapped[Order] = relationship()

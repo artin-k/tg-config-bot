@@ -4,13 +4,13 @@ import structlog
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.fsm.storage.base import BaseStorage
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.storage.redis import RedisStorage
 
 from app.config import Settings
 from app.database import async_session_maker
 from bot.middlewares.db import DbSessionMiddleware
-from bot.routers import admin, buy, common, errors, services, start, support, tariffs
+from bot.routers import admin, buy, common, errors, referral, renewal, services, start, support, tariffs, tutorials, tracking, wallet
 
 
 def setup_logging() -> None:
@@ -35,11 +35,7 @@ def create_bot(settings: Settings) -> Bot:
 
 
 def create_dispatcher(settings: Settings) -> Dispatcher:
-    storage = (
-        RedisStorage.from_url(settings.redis_url)
-        if settings.fsm_storage == "redis" and settings.redis_url
-        else MemoryStorage()
-    )
+    storage = _create_storage(settings)
     dp = Dispatcher(storage=storage, settings=settings)
     db_middleware = DbSessionMiddleware(async_session_maker)
     dp.update.middleware(db_middleware)
@@ -47,9 +43,24 @@ def create_dispatcher(settings: Settings) -> Dispatcher:
     dp.include_router(errors.router)
     dp.include_router(start.router)
     dp.include_router(buy.router)
+    dp.include_router(renewal.router)
     dp.include_router(services.router)
     dp.include_router(tariffs.router)
+    dp.include_router(tracking.router)
+    dp.include_router(tutorials.router)
+    dp.include_router(referral.router)
+    dp.include_router(wallet.router)
     dp.include_router(support.router)
     dp.include_router(admin.router)
     dp.include_router(common.router)
     return dp
+
+
+def _create_storage(settings: Settings) -> BaseStorage:
+    if settings.fsm_storage == "redis" and settings.redis_url:
+        try:
+            from aiogram.fsm.storage.redis import RedisStorage
+        except ImportError as exc:
+            raise RuntimeError("Redis FSM storage requires installing the optional redis package.") from exc
+        return RedisStorage.from_url(settings.redis_url)
+    return MemoryStorage()

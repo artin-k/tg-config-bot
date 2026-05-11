@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.models import Order, OrderStatus, PaymentStatus, Plan, User
+from app.models import Order, OrderKind, OrderStatus, PaymentStatus, Plan, User
 from app.repositories.orders import OrdersRepository
 from app.repositories.payments import PaymentsRepository
 from app.utils.tracking import generate_tracking_code
@@ -21,7 +21,9 @@ class OrderService:
         *,
         user: User,
         plan: Plan,
-        custom_username: str,
+        custom_username: str | None,
+        order_kind: str = OrderKind.PURCHASE.value,
+        service_id: int | None = None,
     ) -> tuple[Order, object]:
         tracking_code = await self._generate_unique_tracking_code()
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=self.settings.order_expire_minutes)
@@ -30,6 +32,8 @@ class OrderService:
             user_id=user.id,
             plan_id=plan.id,
             custom_username=custom_username,
+            order_kind=order_kind,
+            service_id=service_id,
             tracking_code=tracking_code,
             amount=plan.price,
             status=OrderStatus.PENDING_PAYMENT.value,
