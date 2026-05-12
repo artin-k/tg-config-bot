@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.repositories.users import UsersRepository
+from app.services.affiliate_service import AffiliateService
 from bot import texts
 from bot.keyboards.common import BACK_TO_MAIN_CALLBACK
 from bot.keyboards.main_menu import main_menu_keyboard
@@ -19,20 +20,26 @@ async def start(message: Message, session: AsyncSession, settings: Settings) -> 
 
     users = UsersRepository(session)
     existing_user = await users.get_by_telegram_id(message.from_user.id)
+    referral_code = _extract_referral_code(message.text)
+    is_root_admin = settings.root_admin_telegram_id == message.from_user.id
     user = await users.create_or_update_from_telegram(
         telegram_id=message.from_user.id,
         telegram_username=message.from_user.username,
         first_name=message.from_user.first_name,
         is_admin=message.from_user.id in settings.admin_ids,
+        is_root_admin=is_root_admin,
     )
-    referral_code = _extract_referral_code(message.text)
-    if existing_user is None and referral_code:
-        referrer = await users.get_by_referral_code(referral_code)
-        if referrer is not None and referrer.telegram_id != message.from_user.id:
-            user.referred_by_id = referrer.id
+    await AffiliateService(session, settings).apply_start_referral(
+        user=user,
+        is_new_user=existing_user is None,
+        referral_code=referral_code,
+    )
     await session.commit()
 
-    await message.answer(texts.welcome_text(message.from_user.first_name), reply_markup=main_menu_keyboard())
+    await message.answer(
+        texts.welcome_text(message.from_user.first_name),
+        reply_markup=main_menu_keyboard(is_admin=user.is_admin),
+    )
 
 
 @router.message(F.text == texts.BTN_BACK)

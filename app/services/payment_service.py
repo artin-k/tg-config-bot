@@ -19,6 +19,7 @@ from app.models import (
 from app.repositories.dice_rolls import DiceRollsRepository
 from app.repositories.services import ServicesRepository
 from app.repositories.wallet_transactions import WalletTransactionsRepository
+from app.services.affiliate_service import AffiliateService
 from app.services.order_service import OrderService
 from app.services.referral_service import ReferralService
 from app.services.renewal_service import RenewalService
@@ -105,6 +106,8 @@ class PaymentService:
         order.status = OrderStatus.COMPLETED.value
         order.completed_at = now
         await self._record_discount_usage(order, now)
+        if self.settings is not None:
+            await AffiliateService(self.session, self.settings).create_commissions_for_order(order.id)
         await self.session.commit()
 
         return result
@@ -120,6 +123,8 @@ class PaymentService:
         payment.verified_at = datetime.now(timezone.utc)
         if payment.order:
             payment.order.status = OrderStatus.FAILED.value
+            if self.settings is not None:
+                await AffiliateService(self.session, self.settings).reverse_order_commissions(payment.order.id)
         await self.session.commit()
         return RejectedPaymentResult(user_telegram_id=payment.user.telegram_id)
 
@@ -180,6 +185,8 @@ class PaymentService:
         order.status = OrderStatus.COMPLETED.value
         order.completed_at = now
         await self._record_discount_usage(order, now)
+        if self.settings is not None:
+            await AffiliateService(self.session, self.settings).create_commissions_for_order(order.id)
         await self.session.commit()
 
         return ApprovedPaymentResult(

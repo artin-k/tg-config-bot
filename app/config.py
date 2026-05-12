@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     )
     order_expire_minutes: int = Field(default=15, alias="ORDER_EXPIRE_MINUTES")
     referral_reward_amount: int = Field(default=0, alias="REFERRAL_REWARD_AMOUNT")
+    root_admin_telegram_id: int | None = Field(default=None, alias="ROOT_ADMIN_TELEGRAM_ID")
+    owner_commission_percent: float = Field(default=10, alias="OWNER_COMMISSION_PERCENT")
+    referral_commission_percent: float = Field(default=0, alias="REFERRAL_COMMISSION_PERCENT")
+    commission_base: str = Field(default="final_amount", alias="COMMISSION_BASE")
+    affiliate_default_to_root: bool = Field(default=True, alias="AFFILIATE_DEFAULT_TO_ROOT")
     wallet_min_topup_amount: int = Field(default=50000, alias="WALLET_MIN_TOPUP_AMOUNT")
     wallet_max_topup_amount: int = Field(default=0, alias="WALLET_MAX_TOPUP_AMOUNT")
     dice_win_discount_percent: int = Field(default=10, alias="DICE_WIN_DISCOUNT_PERCENT")
@@ -64,6 +69,50 @@ class Settings(BaseSettings):
         normalized = value.strip().lower()
         if normalized not in {"memory", "redis"}:
             return "memory"
+        return normalized
+
+    @field_validator("root_admin_telegram_id", mode="before")
+    @classmethod
+    def normalize_root_admin_telegram_id(cls, value: object) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        text = str(value).strip()
+        if not text:
+            return None
+        return int(text)
+
+    @field_validator("owner_commission_percent", "referral_commission_percent", mode="before")
+    @classmethod
+    def normalize_percent(cls, value: object) -> float:
+        if value is None:
+            return 0
+        if isinstance(value, int | float):
+            return float(value)
+        text = str(value).strip().replace("%", "")
+        if not text:
+            return 0
+        return float(text)
+
+    @field_validator("affiliate_default_to_root", mode="before")
+    @classmethod
+    def normalize_affiliate_default_to_root(cls, value: object) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if not text:
+            return True
+        return text in {"1", "true", "yes", "on", "y"}
+
+    @field_validator("commission_base", mode="after")
+    @classmethod
+    def normalize_commission_base(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"final_amount", "amount"}:
+            return "final_amount"
         return normalized
 
     @property

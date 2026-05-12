@@ -10,7 +10,7 @@ from bot import texts
 router = Router(name="referral")
 
 
-@router.message(F.text == texts.BTN_REFERRAL)
+@router.message(F.text.in_(texts.REFERRAL_BUTTON_TEXTS))
 async def referral(message: Message, state: FSMContext, session: AsyncSession, settings: Settings) -> None:
     await state.clear()
     await menu_actions.show_referral(message, session, settings)

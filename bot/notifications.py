@@ -18,6 +18,8 @@ logger = structlog.get_logger(__name__)
 
 async def get_admin_ids(session: AsyncSession, settings: Settings) -> list[int]:
     admin_ids = set(settings.admin_ids)
+    if settings.root_admin_telegram_id is not None:
+        admin_ids.add(settings.root_admin_telegram_id)
     admin_ids.update(await UsersRepository(session).list_admin_telegram_ids())
     return sorted(admin_ids)
 

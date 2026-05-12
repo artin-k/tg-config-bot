@@ -27,6 +27,7 @@ async def main() -> None:
         fsm_storage=settings.fsm_storage,
         redis_enabled=settings.fsm_storage == "redis" and bool(settings.redis_url),
         admin_ids_count=len(settings.admin_ids),
+        root_admin_configured=settings.root_admin_telegram_id is not None,
     )
     if settings.invalid_admin_ids:
         logger.warning("invalid_admin_ids_ignored", values=settings.invalid_admin_ids)

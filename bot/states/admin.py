@@ -32,6 +32,7 @@ class AdminEditTestAccountStates(StatesGroup):
 class AdminSearchStates(StatesGroup):
     user_query = State()
     service_query = State()
+    affiliate_user_query = State()
 
 
 class AdminWalletAdjustStates(StatesGroup):

@@ -39,6 +39,15 @@ class WalletTransactionsRepository:
         )
         return list(result.all())
 
+    async def list_recent(self, limit: int = 10) -> list[WalletTransaction]:
+        result = await self.session.scalars(
+            select(WalletTransaction)
+            .options(joinedload(WalletTransaction.user), joinedload(WalletTransaction.payment))
+            .order_by(WalletTransaction.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.unique().all())
+
     async def list_pending_topups(self) -> list[WalletTransaction]:
         result = await self.session.scalars(
             select(WalletTransaction)

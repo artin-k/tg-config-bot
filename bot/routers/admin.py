@@ -8,12 +8,23 @@ import structlog
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
-from sqlalchemy import select
+from aiogram.types import CallbackQuery, Message, User as TelegramUser
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.models import Order, OrderKind, Payment, User, VPNServiceStatus, WalletTransactionStatus, WalletTransactionType
+from app.models import (
+    AffiliateBeneficiaryType,
+    AffiliateCommission,
+    AffiliateCommissionStatus,
+    Order,
+    OrderKind,
+    Payment,
+    User,
+    VPNServiceStatus,
+    WalletTransactionStatus,
+    WalletTransactionType,
+)
 from app.repositories.dice_rolls import DiceRollsRepository
 from app.repositories.orders import OrdersRepository
 from app.repositories.payments import PaymentsRepository
@@ -23,6 +34,7 @@ from app.repositories.test_accounts import TestAccountsRepository
 from app.repositories.users import UsersRepository
 from app.repositories.wallet_transactions import WalletTransactionsRepository
 from app.services.order_status import order_kind_label
+from app.services.affiliate_service import AffiliateService
 from app.services.payment_service import (
     ApprovedPaymentResult,
     PaymentAlreadyProcessedError,
@@ -33,14 +45,19 @@ from app.services.payment_service import (
 from app.services.wallet_service import WalletService, WalletTopupAlreadyProcessedError, WalletTopupError
 from app.services.vpn_panel import VPNPanelService
 from app.utils.formatting import (
+    format_commission_status_fa,
     format_datetime,
     format_money,
+    format_order_status_fa,
+    format_percent,
     format_service_status_fa,
+    format_user_display,
     format_wallet_transaction_status_fa,
 )
 from bot import texts
 from bot.keyboards.admin import (
     AdminActionCallback,
+    AdminAffiliateCallback,
     AdminPaymentCallback,
     AdminPlanCallback,
     AdminServiceCallback,
@@ -48,9 +65,24 @@ from bot.keyboards.admin import (
     AdminUserCallback,
     add_plan_confirm_keyboard,
     add_test_account_confirm_keyboard,
+    admin_communications_keyboard,
+    admin_payments_keyboard,
+    admin_sales_keyboard,
+    admin_services_keyboard,
+    admin_settings_keyboard,
+    admin_users_affiliate_keyboard,
+    affiliate_commissions_keyboard,
+    affiliate_management_keyboard,
+    affiliate_orders_keyboard,
+    affiliate_payout_confirm_keyboard,
+    affiliate_search_results_keyboard,
+    affiliate_tree_keyboard,
+    affiliate_user_detail_keyboard,
     admin_main_keyboard,
+    attach_orphans_confirm_keyboard,
     broadcast_confirm_keyboard,
     pending_payments_keyboard,
+    plan_delete_confirm_keyboard,
     plan_detail_keyboard,
     plans_management_keyboard,
     service_detail_keyboard,
@@ -92,6 +124,7 @@ async def admin_panel(message: Message, session: AsyncSession, settings: Setting
     if not await _is_admin(message.from_user.id if message.from_user else None, session, settings):
         await message.answer("⛔ شما دسترسی مدیریت ندارید.")
         return
+    await _ensure_admin_user_record(message.from_user, session, settings)
     await message.answer(texts.ADMIN_PANEL_TEXT, reply_markup=admin_main_keyboard())
 
 
@@ -104,11 +137,12 @@ async def admin_action(
     settings: Settings,
 ) -> None:
     if not await _is_admin(callback.from_user.id if callback.from_user else None, session, settings):
-        await callback.answer("دسترسی ندارید.", show_alert=True)
+        await callback.answer("⛔ شما دسترسی مدیریت ندارید.", show_alert=True)
         return
 
     action = callback_data.action
     await callback.answer()
+    await _ensure_admin_user_record(callback.from_user, session, settings)
 
     if action in {"panel", "back"}:
         await state.clear()
@@ -117,6 +151,41 @@ async def admin_action(
                 await callback.message.answer(texts.MAIN_MENU_TEXT, reply_markup=main_menu_keyboard())
         elif callback.message:
             await callback.message.edit_text(texts.ADMIN_PANEL_TEXT, reply_markup=admin_main_keyboard())
+        return
+
+    if action == "cat_sales":
+        await state.clear()
+        await _safe_edit_or_answer(callback, "📦 فروش و تعرفه‌ها", reply_markup=admin_sales_keyboard())
+        return
+
+    if action == "cat_users":
+        await state.clear()
+        await _safe_edit_or_answer(callback, "👥 کاربران و زیرمجموعه‌ها", reply_markup=admin_users_affiliate_keyboard())
+        return
+
+    if action == "cat_payments":
+        await state.clear()
+        await _safe_edit_or_answer(callback, "💳 پرداخت‌ها و کیف پول", reply_markup=admin_payments_keyboard())
+        return
+
+    if action == "cat_services":
+        await state.clear()
+        await _safe_edit_or_answer(callback, "🛍 سرویس‌ها", reply_markup=admin_services_keyboard())
+        return
+
+    if action == "cat_comms":
+        await state.clear()
+        await _safe_edit_or_answer(callback, "📣 ارتباطات", reply_markup=admin_communications_keyboard())
+        return
+
+    if action == "cat_settings":
+        await state.clear()
+        await _safe_edit_or_answer(callback, "⚙️ تنظیمات", reply_markup=admin_settings_keyboard())
+        return
+
+    if action == "affiliate":
+        await state.clear()
+        await _show_affiliate_management(callback)
         return
 
     if action == "payments":
@@ -154,9 +223,24 @@ async def admin_action(
         await _show_recent_orders(callback, session)
         return
 
+    if action == "sales_report":
+        await state.clear()
+        await _show_sales_report(callback, session)
+        return
+
+    if action == "wallet_transactions":
+        await state.clear()
+        await _show_wallet_transactions(callback, session)
+        return
+
     if action == "dice":
         await state.clear()
         await _show_dice(callback, session, settings)
+        return
+
+    if action in {"tutorials_admin", "support_admin"}:
+        await state.clear()
+        await _safe_edit_or_answer(callback, "این بخش فعلاً از منوی کاربر قابل مدیریت است.", reply_markup=admin_communications_keyboard())
         return
 
     if action == "settings":
@@ -212,6 +296,172 @@ async def admin_action(
         await callback.message.answer(texts.COMING_SOON_TEXT)
 
 
+@router.callback_query(AdminAffiliateCallback.filter())
+async def admin_affiliate_action(
+    callback: CallbackQuery,
+    callback_data: AdminAffiliateCallback,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    if not await _is_admin(callback.from_user.id if callback.from_user else None, session, settings):
+        await callback.answer("⛔ شما دسترسی مدیریت ندارید.", show_alert=True)
+        return
+
+    await callback.answer()
+    await _ensure_admin_user_record(callback.from_user, session, settings)
+    service = AffiliateService(session, settings)
+    action = callback_data.action
+
+    if action == "summary":
+        await state.clear()
+        await _show_affiliate_summary(callback, service)
+        return
+    if action == "tree":
+        await state.clear()
+        await _show_affiliate_tree(callback, service, callback_data.user_id, callback_data.page)
+        return
+    if action == "search":
+        await state.set_state(AdminSearchStates.affiliate_user_query)
+        if callback.message:
+            await callback.message.answer("لطفاً آیدی عددی، یوزرنیم، شماره موبایل یا کد دعوت کاربر را ارسال کنید:")
+        return
+    if action == "detail":
+        await state.clear()
+        user = await session.get(User, callback_data.user_id)
+        if user is None:
+            await _safe_edit_or_answer(callback, "کاربر پیدا نشد.", reply_markup=affiliate_management_keyboard())
+            return
+        await _show_affiliate_user_detail(callback, service, user)
+        return
+    if action == "user_orders":
+        await state.clear()
+        user = await session.get(User, callback_data.user_id)
+        if user is None:
+            await _safe_edit_or_answer(callback, "کاربر پیدا نشد.", reply_markup=affiliate_management_keyboard())
+            return
+        await _show_user_orders(callback, session, user, reply_markup=await _affiliate_user_keyboard(service, user))
+        return
+    if action == "attach_user_root":
+        await state.clear()
+        user = await session.get(User, callback_data.user_id)
+        if user is None:
+            await _safe_edit_or_answer(callback, "کاربر پیدا نشد.", reply_markup=affiliate_management_keyboard())
+            return
+        attached = await service.attach_user_to_root(user)
+        await session.commit()
+        if not attached:
+            await _safe_edit_or_answer(
+                callback,
+                "اتصال این کاربر به ریشه قابل انجام نیست. کاربر یا معرف دارد، یا مالک ریشه تنظیم/فعال نیست.",
+                reply_markup=await _affiliate_user_keyboard(service, user),
+            )
+            return
+        await _safe_edit_or_answer(
+            callback,
+            "✅ کاربر به مالک ریشه متصل شد.",
+            reply_markup=await _affiliate_user_keyboard(service, user),
+        )
+        return
+    if action == "commissions":
+        await state.clear()
+        await _show_commissions_report(callback, service)
+        return
+    if action == "commissions_root":
+        await state.clear()
+        await _show_commissions_report(callback, service, beneficiary_type=AffiliateBeneficiaryType.ROOT_OWNER.value)
+        return
+    if action == "commissions_direct":
+        await state.clear()
+        await _show_commissions_report(callback, service, beneficiary_type=AffiliateBeneficiaryType.DIRECT_REFERRER.value)
+        return
+    if action == "commissions_unpaid":
+        await state.clear()
+        await _show_commissions_report(callback, service, status=AffiliateCommissionStatus.APPROVED.value)
+        return
+    if action == "orders":
+        await state.clear()
+        await _show_downline_orders(callback, service, page=callback_data.page)
+        return
+    if action == "payouts":
+        await state.clear()
+        await _show_commission_payouts(callback, service)
+        return
+    if action == "settings":
+        await state.clear()
+        await _show_affiliate_settings(callback, service)
+        return
+    if action == "attach":
+        await state.clear()
+        await _show_attach_orphans_confirm(callback, service)
+        return
+    if action == "attach_confirm":
+        await state.clear()
+        count = await service.attach_orphans_to_root()
+        await session.commit()
+        await _safe_edit_or_answer(
+            callback,
+            f"✅ {count} کاربر به مالک ریشه متصل شدند.",
+            reply_markup=affiliate_management_keyboard(),
+        )
+        return
+    if action == "pay":
+        await state.clear()
+        await _safe_edit_or_answer(
+            callback,
+            "آیا از تسویه کمیسیون‌های انتخاب‌شده مطمئن هستید؟",
+            reply_markup=affiliate_payout_confirm_keyboard(commission_id=callback_data.commission_id),
+        )
+        return
+    if action == "pay_confirm":
+        await state.clear()
+        commission = await service.mark_commission_paid(callback_data.commission_id)
+        await session.commit()
+        if commission is None:
+            await _safe_edit_or_answer(callback, "کمیسیون پیدا نشد.", reply_markup=affiliate_management_keyboard())
+            return
+        await _safe_edit_or_answer(
+            callback,
+            f"✅ کمیسیون {commission.id} تسویه شد.",
+            reply_markup=affiliate_management_keyboard(),
+        )
+        return
+    if action == "pay_all_root":
+        await state.clear()
+        await _safe_edit_or_answer(
+            callback,
+            "آیا از تسویه کمیسیون‌های انتخاب‌شده مطمئن هستید؟",
+            reply_markup=affiliate_payout_confirm_keyboard(pay_all_root=True),
+        )
+        return
+    if action == "pay_all_root_confirm":
+        await state.clear()
+        count = await service.mark_all_root_approved_paid()
+        await session.commit()
+        await _safe_edit_or_answer(
+            callback,
+            f"✅ {count} کمیسیون تاییدشده مالک ریشه تسویه شد.",
+            reply_markup=affiliate_management_keyboard(),
+        )
+        return
+    if action == "rebuild":
+        await state.clear()
+        processed, created, skipped = await service.rebuild_commissions_for_completed_orders()
+        await session.commit()
+        await _safe_edit_or_answer(
+            callback,
+            f"""🔄 بازسازی کمیسیون سفارش‌های تکمیل‌شده
+
+🧾 سفارش‌های بررسی‌شده: {processed}
+✅ کمیسیون‌های ساخته‌شده: {created}
+⏭ بدون تغییر/ردشده: {skipped}""",
+            reply_markup=affiliate_management_keyboard(),
+        )
+        return
+
+    await _safe_edit_or_answer(callback, "عملیات نامعتبر است.", reply_markup=affiliate_management_keyboard())
+
+
 @router.callback_query(AdminPaymentCallback.filter())
 async def admin_payment_action(
     callback: CallbackQuery,
@@ -220,7 +470,7 @@ async def admin_payment_action(
     settings: Settings,
 ) -> None:
     if not await _is_admin(callback.from_user.id if callback.from_user else None, session, settings):
-        await callback.answer("دسترسی ندارید.", show_alert=True)
+        await callback.answer("⛔ شما دسترسی مدیریت ندارید.", show_alert=True)
         return
 
     payment_service = PaymentService(session, VPNPanelService(), settings)
@@ -258,7 +508,7 @@ async def admin_wallet_topup_action(
     settings: Settings,
 ) -> None:
     if not await _is_admin(callback.from_user.id if callback.from_user else None, session, settings):
-        await callback.answer("دسترسی ندارید.", show_alert=True)
+        await callback.answer("⛔ شما دسترسی مدیریت ندارید.", show_alert=True)
         return
 
     try:
@@ -301,7 +551,7 @@ async def admin_plan_action(
     settings: Settings,
 ) -> None:
     if not await _is_admin(callback.from_user.id if callback.from_user else None, session, settings):
-        await callback.answer("دسترسی ندارید.", show_alert=True)
+        await callback.answer("⛔ شما دسترسی مدیریت ندارید.", show_alert=True)
         return
 
     await callback.answer()
@@ -332,6 +582,22 @@ async def admin_plan_action(
         return
 
     if action == "delete":
+        usage_note = ""
+        if await plans_repo.has_usage(plan.id):
+            usage_note = "\n\n⚠️ این تعرفه سفارش یا سرویس ثبت‌شده دارد؛ در صورت تایید، حذف کامل انجام نمی‌شود و فقط غیرفعال خواهد شد."
+        await _safe_edit_or_answer(
+            callback,
+            f"""⚠️ تایید حذف تعرفه
+
+آیا از حذف این تعرفه مطمئن هستید؟
+
+عنوان: {escape(plan.title)}
+قیمت: {format_money(plan.price)} تومان{usage_note}""",
+            reply_markup=plan_delete_confirm_keyboard(plan),
+        )
+        return
+
+    if action == "delete_confirm":
         if await plans_repo.has_usage(plan.id):
             await plans_repo.set_active(plan.id, False)
             await session.commit()
@@ -339,7 +605,7 @@ async def admin_plan_action(
             detail = _format_plan_detail(refreshed) if refreshed is not None else ""
             await _safe_edit_or_answer(
                 callback,
-                f"این تعرفه سفارش یا سرویس ثبت‌شده دارد؛ حذف نشد و به‌جای آن غیرفعال شد.\n\n{detail}",
+                f"این تعرفه سفارش یا سرویس ثبت‌شده دارد؛ حذف کامل ممکن نیست و به‌جای آن غیرفعال شد.\n\n{detail}",
                 reply_markup=plan_detail_keyboard(refreshed) if refreshed is not None else None,
             )
             return
@@ -360,7 +626,7 @@ async def admin_test_account_action(
     settings: Settings,
 ) -> None:
     if not await _is_admin(callback.from_user.id if callback.from_user else None, session, settings):
-        await callback.answer("دسترسی ندارید.", show_alert=True)
+        await callback.answer("⛔ شما دسترسی مدیریت ندارید.", show_alert=True)
         return
     await callback.answer()
 
@@ -423,7 +689,7 @@ async def admin_user_action(
     settings: Settings,
 ) -> None:
     if not await _is_admin(callback.from_user.id if callback.from_user else None, session, settings):
-        await callback.answer("دسترسی ندارید.", show_alert=True)
+        await callback.answer("⛔ شما دسترسی مدیریت ندارید.", show_alert=True)
         return
     await callback.answer()
 
@@ -474,7 +740,7 @@ async def admin_service_action(
     settings: Settings,
 ) -> None:
     if not await _is_admin(callback.from_user.id if callback.from_user else None, session, settings):
-        await callback.answer("دسترسی ندارید.", show_alert=True)
+        await callback.answer("⛔ شما دسترسی مدیریت ندارید.", show_alert=True)
         return
     await callback.answer()
 
@@ -704,6 +970,33 @@ async def admin_user_search(message: Message, state: FSMContext, session: AsyncS
     await message.answer("نتایج جستجوی کاربران:", reply_markup=users_admin_keyboard(users))
 
 
+@router.message(AdminSearchStates.affiliate_user_query)
+async def admin_affiliate_user_search(message: Message, state: FSMContext, session: AsyncSession, settings: Settings) -> None:
+    if not await _guard_admin_message(message, state, session, settings):
+        return
+    users = await UsersRepository(session).search(message.text or "", limit=8)
+    await state.clear()
+    if not users:
+        await message.answer("کاربری با این مشخصات پیدا نشد.", reply_markup=affiliate_management_keyboard())
+        return
+    if len(users) == 1:
+        bot_info = await message.bot.get_me()
+        service = AffiliateService(session, settings)
+        await message.answer(
+            _format_affiliate_user_detail(
+                await service.user_detail(users[0]),
+                bot_username=bot_info.username,
+            ),
+            reply_markup=await _affiliate_user_keyboard(service, users[0]),
+        )
+        return
+
+    lines = ["نتایج جستجوی کاربران:"]
+    for user in users:
+        lines.append(f"{user.id}. {format_user_display(user)} | کد دعوت: {escape(user.referral_code or '-')}")
+    await message.answer("\n".join(lines), reply_markup=affiliate_search_results_keyboard(users))
+
+
 @router.message(AdminEditTestAccountStates.value)
 async def edit_test_account_value(message: Message, state: FSMContext, session: AsyncSession, settings: Settings) -> None:
     if not await _guard_admin_message(message, state, session, settings):
@@ -928,6 +1221,297 @@ async def _send_broadcast(callback: CallbackQuery, state: FSMContext, session: A
         await callback.message.answer(f"📢 ارسال پیام همگانی تمام شد.\n✅ موفق: {success}\n❌ ناموفق: {failed}")
 
 
+async def _show_affiliate_management(callback: CallbackQuery) -> None:
+    await _safe_edit_or_answer(
+        callback,
+        "👥 مدیریت زیرمجموعه‌ها\n\nیکی از گزارش‌ها یا عملیات زیر را انتخاب کنید:",
+        reply_markup=affiliate_management_keyboard(),
+    )
+
+
+def _root_owner_status_text(settings: Settings, root: User | None) -> str:
+    if settings.root_admin_telegram_id is None:
+        return "تنظیم نشده"
+    if root is None:
+        return "هنوز ربات را استارت نکرده است"
+    return f"{format_user_display(root)}"
+
+
+def _affiliate_root_warnings(settings: Settings, root: User | None) -> str:
+    if settings.root_admin_telegram_id is None:
+        return "\n\n⚠️ برای فعال شدن کامل سیستم زیرمجموعه‌گیری، ROOT_ADMIN_TELEGRAM_ID را در فایل .env تنظیم کنید."
+    if root is None:
+        return "\n\n⚠️ مالک ریشه تنظیم شده، اما هنوز ربات را استارت نکرده است."
+    return ""
+
+
+async def _show_affiliate_summary(callback: CallbackQuery, service: AffiliateService) -> None:
+    summary = await service.summary()
+    root_name = _root_owner_status_text(service.settings, summary.root_owner)
+    warnings = _affiliate_root_warnings(service.settings, summary.root_owner)
+    text = f"""📊 خلاصه زیرمجموعه‌گیری
+
+👑 مالک ریشه: {root_name}
+👥 کل کاربران: {summary.total_users}
+🌱 کاربران مستقیم زیرمجموعه ریشه: {summary.direct_root_users}
+👥 کل کاربران زیرمجموعه ریشه: {summary.total_downline_users}
+🧩 کاربران بدون معرف: {summary.orphan_users}
+
+🛒 سفارش‌های موفق: {summary.completed_orders}
+💵 فروش کل: {format_money(summary.total_revenue)} تومان
+💰 کمیسیون کل مالک: {format_money(summary.root_total_commission)} تومان
+🧾 کمیسیون تسویه‌شده مالک: {format_money(summary.root_paid_commission)} تومان
+⏳ کمیسیون تسویه‌نشده مالک: {format_money(summary.root_unpaid_commission)} تومان
+🤝 کمیسیون مستقیم کاربران: {format_money(summary.direct_referral_commissions)} تومان
+
+امروز: {summary.today_orders} سفارش | {format_money(summary.today_revenue)} تومان
+۷ روز اخیر: {summary.week_orders} سفارش | {format_money(summary.week_revenue)} تومان
+این ماه: {summary.month_orders} سفارش | {format_money(summary.month_revenue)} تومان{warnings}"""
+    await _safe_edit_or_answer(callback, text, reply_markup=affiliate_management_keyboard())
+
+
+async def _show_affiliate_tree(
+    callback: CallbackQuery,
+    service: AffiliateService,
+    parent_id: int,
+    page: int,
+) -> None:
+    root = await service.get_root_owner()
+    if root is None:
+        await _safe_edit_or_answer(
+            callback,
+            "برای مشاهده درخت زیرمجموعه‌ها ابتدا مالک ریشه باید تنظیم شده و ربات را استارت کرده باشد.",
+            reply_markup=affiliate_management_keyboard(),
+        )
+        return
+    parent = await service.session.get(User, parent_id) if parent_id else root
+    if parent is None:
+        await _safe_edit_or_answer(callback, "کاربر پیدا نشد.", reply_markup=affiliate_management_keyboard())
+        return
+
+    rows, has_next = await service.direct_referrals_with_sales(parent_id=parent.id, page=page)
+    lines = [
+        "🌳 درخت زیرمجموعه‌ها",
+        "",
+        f"{'👑' if parent.id == root.id else '👤'} {format_user_display(parent)}",
+    ]
+    if not rows:
+        lines.append("هنوز کاربری زیرمجموعه مالک ریشه نیست." if parent.id == root.id else "زیرمجموعه مستقیمی برای این کاربر ثبت نشده است.")
+    for index, (user, orders_count, revenue, children_count) in enumerate(rows, start=1 + page * 10):
+        branch = "└─" if index == len(rows) + page * 10 else "├─"
+        lines.append(
+            f"{branch} 👤 {format_user_display(user)} | خرید موفق: {orders_count} | فروش: {format_money(revenue)} تومان | زیرمجموعه مستقیم: {children_count}"
+        )
+    await _safe_edit_or_answer(
+        callback,
+        "\n".join(lines),
+        reply_markup=affiliate_tree_keyboard(
+            parent_id=parent.id,
+            page=max(page, 0),
+            has_next=has_next,
+            users=[row[0] for row in rows],
+        ),
+    )
+
+
+async def _show_affiliate_user_detail(callback: CallbackQuery, service: AffiliateService, user: User) -> None:
+    detail = await service.user_detail(user)
+    bot_info = await callback.bot.get_me()
+    await _safe_edit_or_answer(
+        callback,
+        _format_affiliate_user_detail(detail, bot_username=bot_info.username),
+        reply_markup=await _affiliate_user_keyboard(service, user),
+    )
+
+
+async def _affiliate_user_keyboard(service: AffiliateService, user: User):
+    root = await service.get_root_owner()
+    include_attach = root is not None and user.id != root.id and user.referred_by_id is None and not user.is_root_admin
+    return affiliate_user_detail_keyboard(user.id, include_attach_to_root=include_attach)
+
+
+async def _show_commissions_report(
+    callback: CallbackQuery,
+    service: AffiliateService,
+    *,
+    beneficiary_type: str | None = None,
+    status: str | None = None,
+) -> None:
+    commissions = await service.recent_commissions(limit=10, beneficiary_type=beneficiary_type, status=status)
+    totals = await service.commission_totals()
+    if not commissions:
+        text = f"""💰 گزارش کمیسیون‌ها
+
+جمع کل کمیسیون‌ها: {format_money(totals["total"])} تومان
+پرداخت‌نشده‌ها: {format_money(totals["approved"])} تومان
+تسویه‌شده‌ها: {format_money(totals["paid"])} تومان
+کمیسیون مالک ریشه: {format_money(totals["root"])} تومان
+کمیسیون مستقیم کاربران: {format_money(totals["direct"])} تومان
+
+موردی برای این فیلتر پیدا نشد."""
+        await _safe_edit_or_answer(callback, text, reply_markup=affiliate_commissions_keyboard([]))
+        return
+    lines = [
+        "💰 گزارش کمیسیون‌ها",
+        "",
+        f"جمع کل کمیسیون‌ها: {format_money(totals['total'])} تومان",
+        f"پرداخت‌نشده‌ها: {format_money(totals['approved'])} تومان",
+        f"تسویه‌شده‌ها: {format_money(totals['paid'])} تومان",
+        f"کمیسیون مالک ریشه: {format_money(totals['root'])} تومان",
+        f"کمیسیون مستقیم کاربران: {format_money(totals['direct'])} تومان",
+    ]
+    for commission in commissions:
+        lines.append(_format_commission_item(commission))
+    await _safe_edit_or_answer(
+        callback,
+        "\n".join(lines),
+        reply_markup=affiliate_commissions_keyboard(commissions),
+    )
+
+
+async def _show_commission_payouts(callback: CallbackQuery, service: AffiliateService) -> None:
+    root = await service.get_root_owner()
+    if root is None:
+        await _safe_edit_or_answer(
+            callback,
+            "ابتدا مالک ریشه باید تنظیم شده و ربات را استارت کرده باشد.",
+            reply_markup=affiliate_management_keyboard(),
+        )
+        return
+    commissions = await service.approved_root_commissions(limit=10)
+    if not commissions:
+        await _safe_edit_or_answer(
+            callback,
+            "کمیسیون تسویه‌نشده‌ای وجود ندارد.",
+            reply_markup=affiliate_management_keyboard(),
+        )
+        return
+    total = sum(commission.commission_amount for commission in commissions)
+    lines = [f"🏦 تسویه کمیسیون‌ها\n\nمجموع قابل نمایش برای تسویه: {format_money(total)} تومان"]
+    for commission in commissions:
+        lines.append(_format_commission_item(commission))
+    await _safe_edit_or_answer(
+        callback,
+        "\n".join(lines),
+        reply_markup=affiliate_commissions_keyboard(commissions, include_pay_all=True),
+    )
+
+
+async def _show_downline_orders(callback: CallbackQuery, service: AffiliateService, *, page: int = 0) -> None:
+    orders, has_next = await service.recent_downline_orders(page=page, page_size=10)
+    if not orders:
+        await _safe_edit_or_answer(callback, "هنوز سفارشی برای زیرمجموعه‌ها ثبت نشده است.", reply_markup=affiliate_management_keyboard())
+        return
+    lines = [f"🧾 سفارش‌های زیرمجموعه‌ها\n\nصفحه {max(page, 0) + 1}"]
+    for order in orders:
+        buyer = order.user
+        referred_by = buyer.referred_by if buyer else None
+        commission_amount = int(
+            await service.session.scalar(
+                select(func.coalesce(func.sum(AffiliateCommission.commission_amount), 0)).where(
+                    AffiliateCommission.order_id == order.id
+                )
+            )
+            or 0
+        )
+        lines.append(
+            f"""
+👤 خریدار: {format_user_display(buyer)}
+🔗 معرف: {format_user_display(referred_by)}
+🛒 کد پیگیری: {order.tracking_code}
+⚡ نوع: {order_kind_label(order.order_kind)}
+📦 پلن: {escape(order.plan.title if order.plan else "-")}
+💵 مبلغ: {format_money(order.amount)} تومان
+📌 وضعیت: {format_order_status_fa(order.status)}
+💰 کمیسیون: {format_money(commission_amount)} تومان
+🗓 تاریخ: {format_datetime(order.created_at)}"""
+        )
+    await _safe_edit_or_answer(
+        callback,
+        "\n".join(lines),
+        reply_markup=affiliate_orders_keyboard(page=max(page, 0), has_next=has_next),
+    )
+
+
+async def _show_attach_orphans_confirm(callback: CallbackQuery, service: AffiliateService) -> None:
+    root = await service.get_root_owner()
+    if root is None:
+        await _safe_edit_or_answer(
+            callback,
+            "ابتدا مالک ریشه باید تنظیم شده و ربات را استارت کرده باشد.",
+            reply_markup=affiliate_management_keyboard(),
+        )
+        return
+    count = await service.count_orphans()
+    if count == 0:
+        await _safe_edit_or_answer(callback, "کاربر بدون معرف وجود ندارد.", reply_markup=affiliate_management_keyboard())
+        return
+    await _safe_edit_or_answer(
+        callback,
+        f"""تعداد {count} کاربر بدون معرف پیدا شد.
+آیا می‌خواهید همه آن‌ها به مالک ریشه متصل شوند؟""",
+        reply_markup=attach_orphans_confirm_keyboard(),
+    )
+
+
+async def _show_affiliate_settings(callback: CallbackQuery, service: AffiliateService) -> None:
+    settings = service.settings
+    root_id = settings.root_admin_telegram_id or "-"
+    root = await service.get_root_owner()
+    orphan_count = await service.count_orphans()
+    warnings: list[str] = []
+    if settings.root_admin_telegram_id is None:
+        warnings.append("برای فعال شدن کامل سیستم زیرمجموعه‌گیری، ROOT_ADMIN_TELEGRAM_ID را در فایل .env تنظیم کنید.")
+    elif root is None:
+        warnings.append("مالک ریشه هنوز ربات را استارت نکرده است.")
+    if orphan_count > 0:
+        warnings.append(f"{orphan_count} کاربر بدون معرف وجود دارد.")
+    warning_text = "\n\n⚠️ هشدارها:\n" + "\n".join(f"- {item}" for item in warnings) if warnings else ""
+    text = f"""⚙️ تنظیمات زیرمجموعه‌گیری
+
+ROOT_ADMIN_TELEGRAM_ID: {root_id}
+وضعیت مالک ریشه: {_root_owner_status_text(settings, root)}
+OWNER_COMMISSION_PERCENT: {format_percent(settings.owner_commission_percent)}
+REFERRAL_COMMISSION_PERCENT: {format_percent(settings.referral_commission_percent)}
+COMMISSION_BASE: {settings.commission_base}
+AFFILIATE_DEFAULT_TO_ROOT: {"فعال" if settings.affiliate_default_to_root else "غیرفعال"}
+
+این تنظیمات از فایل .env خوانده می‌شوند. برای تغییر، فایل .env را ویرایش و ربات را مجدداً اجرا کنید.{warning_text}"""
+    await _safe_edit_or_answer(callback, text, reply_markup=affiliate_management_keyboard())
+
+
+async def _show_sales_report(callback: CallbackQuery, session: AsyncSession) -> None:
+    row = await session.execute(
+        select(func.count(Order.id), func.coalesce(func.sum(Order.amount), 0)).where(
+            Order.status == "completed"
+        )
+    )
+    orders_count, revenue = row.one()
+    await _safe_edit_or_answer(
+        callback,
+        f"📈 گزارش فروش\n\n🛒 سفارش‌های موفق: {int(orders_count or 0)}\n💵 فروش کل: {format_money(int(revenue or 0))} تومان",
+        reply_markup=admin_sales_keyboard(),
+    )
+
+
+async def _show_wallet_transactions(callback: CallbackQuery, session: AsyncSession) -> None:
+    transactions = await WalletTransactionsRepository(session).list_recent(limit=10)
+    if not transactions:
+        await _safe_edit_or_answer(callback, "هنوز تراکنش کیف پولی ثبت نشده است.", reply_markup=admin_payments_keyboard())
+        return
+    lines = ["📜 تراکنش‌های کیف پول"]
+    for transaction in transactions:
+        user = transaction.user
+        lines.append(
+            f"""
+👤 کاربر: {format_user_display(user)}
+💵 مبلغ: {format_money(transaction.amount)} تومان
+📌 وضعیت: {format_wallet_transaction_status_fa(transaction.status)}
+🗓 تاریخ: {format_datetime(transaction.created_at)}"""
+        )
+    await _safe_edit_or_answer(callback, "\n".join(lines), reply_markup=admin_payments_keyboard())
+
+
 async def _show_pending_payments(callback: CallbackQuery, session: AsyncSession) -> None:
     payments = await PaymentsRepository(session).list_pending_review()
     if not payments:
@@ -983,17 +1567,29 @@ async def _show_pending_wallet_topups(callback: CallbackQuery, session: AsyncSes
 async def _show_plans(callback: CallbackQuery, session: AsyncSession, prefix: str = "") -> None:
     plans = await PlansRepository(session).list_all()
     if not plans:
-        text = f"{prefix}هنوز تعرفه‌ای ثبت نشده است."
+        text = f"""{prefix}📦 مدیریت تعرفه‌ها
+
+هنوز تعرفه‌ای ثبت نشده است.
+برای ساخت تعرفه جدید از دکمه «➕ افزودن تعرفه» استفاده کنید."""
     else:
-        lines = [f"{prefix}📦 مدیریت تعرفه‌ها:"]
-        for plan in plans:
-            status = "فعال" if plan.is_active else "غیرفعال"
+        lines = [
+            f"{prefix}📦 مدیریت تعرفه‌ها",
+            "",
+            "از این بخش می‌توانید تعرفه‌ها را اضافه، ویرایش، فعال/غیرفعال یا حذف کنید.",
+            "برای ویرایش کامل، روی دکمه «⚙️ مدیریت» هر تعرفه بزنید.",
+            "",
+            "📋 لیست تعرفه‌ها:",
+        ]
+        for index, plan in enumerate(plans, start=1):
+            status = "🟢 فعال" if plan.is_active else "🔴 غیرفعال"
             lines.append(
                 f"""
-{escape(plan.title)}
-وضعیت: {status}
-حجم: {plan.volume_gb} گیگ | مدت: {plan.duration_days} روز | قیمت: {format_money(plan.price)} تومان
-ترتیب نمایش: {plan.sort_order}"""
+{index}. {escape(plan.title)}
+📌 وضعیت: {status}
+📦 حجم: {plan.volume_gb} گیگ
+🗓 مدت: {plan.duration_days} روز
+💵 قیمت: {format_money(plan.price)} تومان
+🔢 ترتیب نمایش: {plan.sort_order}"""
             )
         text = "\n".join(lines)
 
@@ -1055,15 +1651,15 @@ async def _show_user_detail(callback: CallbackQuery, session: AsyncSession, user
     await _safe_edit_or_answer(callback, text, reply_markup=user_detail_keyboard(user, viewer_id=viewer_id))
 
 
-async def _show_user_orders(callback: CallbackQuery, session: AsyncSession, user: User) -> None:
+async def _show_user_orders(callback: CallbackQuery, session: AsyncSession, user: User, reply_markup=None) -> None:
     orders = await OrdersRepository(session).list_by_user(user.id)
     if not orders:
-        await _safe_edit_or_answer(callback, "این کاربر سفارشی ندارد.")
+        await _safe_edit_or_answer(callback, "این کاربر سفارشی ندارد.", reply_markup=reply_markup)
         return
     lines = [f"🧾 سفارش‌های {escape(user.first_name or str(user.telegram_id))}"]
     for order in orders[:10]:
         lines.append(f"{order.tracking_code} | {order_kind_label(order.order_kind)} | {format_money(order.amount)} تومان | {order.status}")
-    await _safe_edit_or_answer(callback, "\n".join(lines))
+    await _safe_edit_or_answer(callback, "\n".join(lines), reply_markup=reply_markup)
 
 
 async def _show_user_services(callback: CallbackQuery, session: AsyncSession, user: User) -> None:
@@ -1075,6 +1671,53 @@ async def _show_user_services(callback: CallbackQuery, session: AsyncSession, us
     for service in services[:10]:
         lines.append(f"{service.username} | {format_service_status_fa(service.status)} | انقضا: {format_datetime(service.expire_at)}")
     await _safe_edit_or_answer(callback, "\n".join(lines))
+
+
+def _format_affiliate_user_detail(detail, *, bot_username: str | None = None) -> str:
+    user = detail.user
+    referral_link = f"https://t.me/{bot_username or 'bot'}?start={user.referral_code}"
+    root_badge = "بله" if user.is_root_admin else "خیر"
+    username = f"@{user.telegram_username}" if user.telegram_username else "-"
+    return f"""👤 جزئیات زیرمجموعه کاربر
+
+🆔 آیدی عددی: {user.telegram_id}
+👤 نام: {escape(user.first_name or "-")}
+🔗 یوزرنیم: {escape(username)}
+📱 موبایل: {escape(user.phone_number or "-")}
+👑 مالک ریشه: {root_badge}
+🔗 معرف: {format_user_display(detail.referred_by)}
+🎟 کد دعوت: {escape(user.referral_code or "-")}
+🔗 لینک دعوت: {referral_link}
+🌱 دعوت مستقیم: {detail.direct_referrals}
+🌳 کل زیرمجموعه‌ها: {detail.total_downline}
+🧾 تعداد سفارش‌ها: {detail.orders_count}
+💵 مبلغ سفارش‌های موفق: {format_money(detail.successful_orders_amount)} تومان
+💰 کمیسیون مالک از این کاربر: {format_money(detail.root_commission_from_user)} تومان
+🤝 کمیسیون معرف مستقیم از این کاربر: {format_money(detail.direct_commission_from_user)} تومان
+🛍 تعداد سرویس‌ها: {detail.services_count}
+🏦 مانده کمیسیون کاربر: {format_money(user.affiliate_balance)} تومان"""
+
+
+def _format_commission_item(commission: AffiliateCommission) -> str:
+    order = commission.order
+    type_label = {
+        AffiliateBeneficiaryType.ROOT_OWNER.value: "مالک ریشه",
+        AffiliateBeneficiaryType.DIRECT_REFERRER.value: "معرف مستقیم",
+        AffiliateBeneficiaryType.MANUAL.value: "دستی",
+    }.get(commission.beneficiary_type, commission.beneficiary_type)
+    tracking_code = order.tracking_code if order else "-"
+    order_kind = order_kind_label(order.order_kind) if order else "-"
+    return f"""
+#{commission.id}
+👤 خریدار: {format_user_display(commission.buyer)}
+🎯 ذی‌نفع: {format_user_display(commission.beneficiary)}
+🏷 نوع: {type_label} | سطح: {commission.level}
+🛒 سفارش: {tracking_code} | {order_kind}
+💵 مبنا: {format_money(commission.base_amount)} تومان
+📈 درصد: {format_percent(commission.percent)}
+💰 کمیسیون: {format_money(commission.commission_amount)} تومان
+📌 وضعیت: {format_commission_status_fa(commission.status)}
+🗓 تاریخ: {format_datetime(commission.created_at)}"""
 
 
 async def _show_services(callback: CallbackQuery, session: AsyncSession) -> None:
@@ -1137,6 +1780,9 @@ async def _show_settings(callback: CallbackQuery, settings: Settings) -> None:
 شماره کارت: {escape(masked_card)}
 نام صاحب کارت: {escape(settings.payment_card_holder or "-")}
 پاداش زیرمجموعه‌گیری: {format_money(settings.referral_reward_amount)} تومان
+مالک ریشه: {settings.root_admin_telegram_id or "-"}
+کمیسیون مالک: {format_percent(settings.owner_commission_percent)}
+کمیسیون معرف مستقیم: {format_percent(settings.referral_commission_percent)}
 حداقل شارژ کیف پول: {format_money(settings.wallet_min_topup_amount)} تومان
 حداکثر شارژ کیف پول: {"بدون محدودیت" if settings.wallet_max_topup_amount == 0 else format_money(settings.wallet_max_topup_amount) + " تومان"}
 درصد تخفیف تاس: {settings.dice_win_discount_percent}٪
@@ -1154,16 +1800,46 @@ async def _show_plan_detail(callback: CallbackQuery, plan) -> None:
 async def _is_admin(telegram_id: int | None, session: AsyncSession, settings: Settings) -> bool:
     if telegram_id is None:
         return False
+    if settings.root_admin_telegram_id is not None and telegram_id == settings.root_admin_telegram_id:
+        return True
     if telegram_id in settings.admin_ids:
         return True
     user = await UsersRepository(session).get_by_telegram_id(telegram_id)
     return bool(user and user.is_admin)
 
 
+async def _ensure_admin_user_record(
+    telegram_user: TelegramUser | None,
+    session: AsyncSession,
+    settings: Settings,
+) -> User | None:
+    if telegram_user is None:
+        return None
+    repo = UsersRepository(session)
+    user = await repo.create_or_update_from_telegram(
+        telegram_id=telegram_user.id,
+        telegram_username=telegram_user.username,
+        first_name=telegram_user.first_name,
+        is_admin=telegram_user.id in settings.admin_ids,
+        is_root_admin=telegram_user.id == settings.root_admin_telegram_id,
+    )
+    if telegram_user.id == settings.root_admin_telegram_id:
+        user = await AffiliateService(session, settings).ensure_root_owner() or user
+    await session.commit()
+    return user
+
+
 async def _guard_admin_message(message: Message, state: FSMContext, session: AsyncSession, settings: Settings) -> bool:
     if not await _is_admin(message.from_user.id if message.from_user else None, session, settings):
         await state.clear()
-        await message.answer("دسترسی ندارید.")
+        await message.answer("⛔ شما دسترسی مدیریت ندارید.")
+        return False
+    await _ensure_admin_user_record(message.from_user, session, settings)
+    if texts.is_main_menu_text(message.text):
+        await state.clear()
+        from bot.routers.menu import route_main_menu_text
+
+        await route_main_menu_text(message, state, session, settings)
         return False
     if (message.text or "").strip() in {texts.BTN_BACK, texts.BTN_MAIN_MENU}:
         await state.clear()
@@ -1177,17 +1853,20 @@ async def _guard_admin_message(message: Message, state: FSMContext, session: Asy
 
 
 def _format_plan_detail(plan) -> str:
-    status = "فعال" if plan.is_active else "غیرفعال"
+    status = "🟢 فعال" if plan.is_active else "🔴 غیرفعال"
     description = plan.description or "-"
     return f"""📦 جزئیات تعرفه
 
+🆔 شناسه: {plan.id}
+📌 وضعیت: {status}
 ⚡ عنوان: {escape(plan.title)}
 📝 توضیحات: {escape(description)}
 📦 حجم: {plan.volume_gb} گیگ
 🗓 مدت: {plan.duration_days} روز
 💵 قیمت: {format_money(plan.price)} تومان
 🔢 ترتیب نمایش: {plan.sort_order}
-📌 وضعیت: {status}"""
+
+چه تغییری می‌خواهید انجام دهید؟"""
 
 
 def _format_plan_data_summary(data: dict) -> str:
@@ -1339,7 +2018,8 @@ async def _safe_edit_or_answer(callback: CallbackQuery, text: str, reply_markup=
         try:
             await callback.message.edit_text(text, reply_markup=reply_markup)
             return
-        except Exception:
+        except Exception as exc:
+            logger.warning("admin_edit_text_failed", error=str(exc))
             await callback.message.answer(text, reply_markup=reply_markup)
 
 

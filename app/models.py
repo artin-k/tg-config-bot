@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -54,6 +54,20 @@ class WalletTransactionStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class AffiliateBeneficiaryType(str, Enum):
+    ROOT_OWNER = "root_owner"
+    DIRECT_REFERRER = "direct_referrer"
+    MANUAL = "manual"
+
+
+class AffiliateCommissionStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    PAID = "paid"
+    CANCELLED = "cancelled"
+    REVERSED = "reversed"
+
+
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -81,13 +95,28 @@ class User(TimestampMixin, Base):
     wallet_balance: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     referral_code: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
     referred_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    referral_depth: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    referral_path: Mapped[str | None] = mapped_column(Text)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    is_root_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    affiliate_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    affiliate_balance: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    affiliate_total_earned: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    affiliate_total_paid: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
     referred_by: Mapped[User | None] = relationship("User", remote_side=lambda: [User.id])
     orders: Mapped[list[Order]] = relationship(back_populates="user")
     payments: Mapped[list[Payment]] = relationship(back_populates="user")
     services: Mapped[list[VPNService]] = relationship(back_populates="user")
     wallet_transactions: Mapped[list[WalletTransaction]] = relationship(back_populates="user")
+    affiliate_commissions_earned: Mapped[list[AffiliateCommission]] = relationship(
+        back_populates="beneficiary",
+        foreign_keys="AffiliateCommission.beneficiary_user_id",
+    )
+    affiliate_commissions_generated: Mapped[list[AffiliateCommission]] = relationship(
+        back_populates="buyer",
+        foreign_keys="AffiliateCommission.buyer_user_id",
+    )
     referral_rewards_sent: Mapped[list[ReferralReward]] = relationship(
         back_populates="referrer",
         foreign_keys="ReferralReward.referrer_id",
@@ -261,6 +290,46 @@ class ReferralReward(TimestampMixin, Base):
         foreign_keys=[referred_user_id],
     )
     order: Mapped[Order] = relationship()
+
+
+class AffiliateCommission(TimestampMixin, Base):
+    __tablename__ = "affiliate_commissions"
+    __table_args__ = (
+        UniqueConstraint("order_id", "beneficiary_user_id", name="uq_affiliate_commissions_order_beneficiary"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), index=True, nullable=False)
+    buyer_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    beneficiary_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    beneficiary_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    level: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    base_amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    percent: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    commission_amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=AffiliateCommissionStatus.APPROVED.value,
+        server_default=AffiliateCommissionStatus.APPROVED.value,
+    )
+    description: Mapped[str | None] = mapped_column(Text)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    order: Mapped[Order] = relationship()
+    buyer: Mapped[User] = relationship(
+        back_populates="affiliate_commissions_generated",
+        foreign_keys=[buyer_user_id],
+    )
+    beneficiary: Mapped[User] = relationship(
+        back_populates="affiliate_commissions_earned",
+        foreign_keys=[beneficiary_user_id],
+    )
 
 
 class TestAccount(TimestampMixin, Base):

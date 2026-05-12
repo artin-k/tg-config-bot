@@ -34,18 +34,21 @@ class AdminServiceCallback(CallbackData, prefix="adm_svc"):
     service_id: int = 0
 
 
+class AdminAffiliateCallback(CallbackData, prefix="adm_aff"):
+    action: str
+    user_id: int = 0
+    page: int = 0
+    commission_id: int = 0
+
+
 def admin_main_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="📦 مدیریت تعرفه‌ها", callback_data=AdminActionCallback(action="plans"))
-    builder.button(text="🔑 مدیریت اکانت تست", callback_data=AdminActionCallback(action="test_accounts"))
-    builder.button(text="💳 پرداخت‌های در انتظار تایید", callback_data=AdminActionCallback(action="payments"))
-    builder.button(text="🏦 شارژهای کیف پول", callback_data=AdminActionCallback(action="wallet_topups"))
-    builder.button(text="🧾 سفارش‌ها", callback_data=AdminActionCallback(action="orders"))
-    builder.button(text="👥 کاربران", callback_data=AdminActionCallback(action="users"))
-    builder.button(text="🛍 سرویس‌ها", callback_data=AdminActionCallback(action="services"))
-    builder.button(text="🎲 گردونه شانس", callback_data=AdminActionCallback(action="dice"))
-    builder.button(text="📢 پیام همگانی", callback_data=AdminActionCallback(action="broadcast"))
-    builder.button(text="⚙️ تنظیمات", callback_data=AdminActionCallback(action="settings"))
+    builder.button(text="📦 فروش و تعرفه‌ها", callback_data=AdminActionCallback(action="cat_sales"))
+    builder.button(text="👥 کاربران و زیرمجموعه‌ها", callback_data=AdminActionCallback(action="cat_users"))
+    builder.button(text="💳 پرداخت‌ها و کیف پول", callback_data=AdminActionCallback(action="cat_payments"))
+    builder.button(text="🛍 سرویس‌ها", callback_data=AdminActionCallback(action="cat_services"))
+    builder.button(text="📣 ارتباطات", callback_data=AdminActionCallback(action="cat_comms"))
+    builder.button(text="⚙️ تنظیمات", callback_data=AdminActionCallback(action="cat_settings"))
     builder.button(text="↩️ بازگشت به ربات", callback_data=AdminActionCallback(action="back"))
     builder.adjust(1)
     return builder.as_markup()
@@ -53,6 +56,179 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
 
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
     return admin_main_keyboard()
+
+
+def admin_sales_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📦 مدیریت تعرفه‌ها", callback_data=AdminActionCallback(action="plans"))
+    builder.button(text="🧾 سفارش‌ها", callback_data=AdminActionCallback(action="orders"))
+    builder.button(text="📈 گزارش فروش", callback_data=AdminActionCallback(action="sales_report"))
+    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="panel"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_users_affiliate_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="👥 کاربران", callback_data=AdminActionCallback(action="users"))
+    builder.button(text="👥 مدیریت زیرمجموعه‌ها", callback_data=AdminActionCallback(action="affiliate"))
+    builder.button(text="💰 گزارش کمیسیون‌ها", callback_data=AdminAffiliateCallback(action="commissions"))
+    builder.button(text="🧩 اتصال کاربران بدون معرف به ریشه", callback_data=AdminAffiliateCallback(action="attach"))
+    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="panel"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_payments_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="💳 پرداخت‌های در انتظار تایید", callback_data=AdminActionCallback(action="payments"))
+    builder.button(text="🏦 شارژهای کیف پول", callback_data=AdminActionCallback(action="wallet_topups"))
+    builder.button(text="📜 تراکنش‌های کیف پول", callback_data=AdminActionCallback(action="wallet_transactions"))
+    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="panel"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_services_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🛍 لیست سرویس‌ها", callback_data=AdminActionCallback(action="services"))
+    builder.button(text="🔎 جستجوی سرویس", callback_data=AdminServiceCallback(action="search"))
+    builder.button(text="🔑 اکانت تست", callback_data=AdminActionCallback(action="test_accounts"))
+    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="panel"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_communications_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📢 پیام همگانی", callback_data=AdminActionCallback(action="broadcast"))
+    builder.button(text="📚 آموزش‌ها", callback_data=AdminActionCallback(action="tutorials_admin"))
+    builder.button(text="☎️ پشتیبانی", callback_data=AdminActionCallback(action="support_admin"))
+    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="panel"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_settings_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⚙️ تنظیمات پرداخت", callback_data=AdminActionCallback(action="settings"))
+    builder.button(text="⚙️ تنظیمات زیرمجموعه‌گیری", callback_data=AdminAffiliateCallback(action="settings"))
+    builder.button(text="🎲 تنظیمات گردونه شانس", callback_data=AdminActionCallback(action="dice"))
+    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="panel"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def affiliate_management_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📊 خلاصه زیرمجموعه‌گیری", callback_data=AdminAffiliateCallback(action="summary"))
+    builder.button(text="🌳 درخت زیرمجموعه‌ها", callback_data=AdminAffiliateCallback(action="tree", page=0))
+    builder.button(text="👤 جستجوی کاربر", callback_data=AdminAffiliateCallback(action="search"))
+    builder.button(text="💰 گزارش کمیسیون‌ها", callback_data=AdminAffiliateCallback(action="commissions"))
+    builder.button(text="🧾 سفارش‌های زیرمجموعه‌ها", callback_data=AdminAffiliateCallback(action="orders"))
+    builder.button(text="🏦 تسویه کمیسیون‌ها", callback_data=AdminAffiliateCallback(action="payouts"))
+    builder.button(text="⚙️ تنظیمات زیرمجموعه‌گیری", callback_data=AdminAffiliateCallback(action="settings"))
+    builder.button(text="🧩 اتصال کاربران بدون معرف به ریشه", callback_data=AdminAffiliateCallback(action="attach"))
+    builder.button(text="🔄 بازسازی کمیسیون سفارش‌های تکمیل‌شده", callback_data=AdminAffiliateCallback(action="rebuild"))
+    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="cat_users"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def affiliate_tree_keyboard(*, parent_id: int, page: int, has_next: bool, users: list[User] | None = None) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for user in users or []:
+        label = user.telegram_username or user.first_name or str(user.telegram_id)
+        builder.button(
+            text=f"👤 مشاهده {label}",
+            callback_data=AdminAffiliateCallback(action="detail", user_id=user.id),
+        )
+    if page > 0:
+        builder.button(
+            text="⬅️ صفحه قبل",
+            callback_data=AdminAffiliateCallback(action="tree", user_id=parent_id, page=page - 1),
+        )
+    if has_next:
+        builder.button(
+            text="صفحه بعد ➡️",
+            callback_data=AdminAffiliateCallback(action="tree", user_id=parent_id, page=page + 1),
+        )
+    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="affiliate"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def affiliate_user_detail_keyboard(user_id: int, *, include_attach_to_root: bool = False) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🌳 زیرمجموعه‌های این کاربر", callback_data=AdminAffiliateCallback(action="tree", user_id=user_id))
+    builder.button(text="🧾 سفارش‌های کاربر", callback_data=AdminAffiliateCallback(action="user_orders", user_id=user_id))
+    if include_attach_to_root:
+        builder.button(text="🧩 اتصال به ریشه", callback_data=AdminAffiliateCallback(action="attach_user_root", user_id=user_id))
+    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="affiliate"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def affiliate_search_results_keyboard(users: list[User]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for user in users:
+        label = user.telegram_username or user.first_name or str(user.telegram_id)
+        builder.button(
+            text=f"👤 {label}",
+            callback_data=AdminAffiliateCallback(action="detail", user_id=user.id),
+        )
+    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="affiliate"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def affiliate_commissions_keyboard(commissions: list, *, include_pay_all: bool = False) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="فقط مالک ریشه", callback_data=AdminAffiliateCallback(action="commissions_root"))
+    builder.button(text="فقط مستقیم کاربران", callback_data=AdminAffiliateCallback(action="commissions_direct"))
+    builder.button(text="پرداخت‌نشده‌ها", callback_data=AdminAffiliateCallback(action="commissions_unpaid"))
+    if include_pay_all:
+        builder.button(text="✅ تسویه همه کمیسیون‌های مالک", callback_data=AdminAffiliateCallback(action="pay_all_root"))
+    for commission in commissions[:8]:
+        if getattr(commission, "status", "") == "approved":
+            builder.button(
+                text=f"✅ تسویه کمیسیون {commission.id}",
+                callback_data=AdminAffiliateCallback(action="pay", commission_id=commission.id),
+            )
+    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="affiliate"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def affiliate_payout_confirm_keyboard(*, commission_id: int = 0, pay_all_root: bool = False) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    action = "pay_all_root_confirm" if pay_all_root else "pay_confirm"
+    builder.button(
+        text="✅ تایید تسویه",
+        callback_data=AdminAffiliateCallback(action=action, commission_id=commission_id),
+    )
+    builder.button(text="❌ لغو", callback_data=AdminAffiliateCallback(action="payouts"))
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def affiliate_orders_keyboard(*, page: int, has_next: bool) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if page > 0:
+        builder.button(text="⬅️ صفحه قبل", callback_data=AdminAffiliateCallback(action="orders", page=page - 1))
+    if has_next:
+        builder.button(text="صفحه بعد ➡️", callback_data=AdminAffiliateCallback(action="orders", page=page + 1))
+    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="affiliate"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def attach_orphans_confirm_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ اتصال به ریشه", callback_data=AdminAffiliateCallback(action="attach_confirm"))
+    builder.button(text="❌ لغو", callback_data=AdminActionCallback(action="affiliate"))
+    builder.adjust(2)
+    return builder.as_markup()
 
 
 def pending_payments_keyboard(payments: list[Payment]) -> InlineKeyboardMarkup:
@@ -107,12 +283,38 @@ def plans_management_keyboard(plans: list[Plan]) -> InlineKeyboardMarkup:
     builder.button(text="➕ افزودن تعرفه", callback_data=AdminActionCallback(action="add_plan"))
     for plan in plans:
         status = "🟢" if plan.is_active else "🔴"
+        toggle_text = "🔴 غیرفعال" if plan.is_active else "🟢 فعال"
         builder.button(
-            text=f"{status} {plan.title}",
+            text=f"⚙️ مدیریت {status} {plan.title}",
             callback_data=AdminPlanCallback(action="detail", plan_id=plan.id),
         )
+        builder.button(
+            text=toggle_text,
+            callback_data=AdminPlanCallback(action="toggle", plan_id=plan.id),
+        )
+        builder.button(
+            text="🗑 حذف",
+            callback_data=AdminPlanCallback(action="delete", plan_id=plan.id),
+        )
     builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="panel"))
-    builder.adjust(1)
+    if plans:
+        builder.adjust(1, *([3] * len(plans)), 1)
+    else:
+        builder.adjust(1)
+    return builder.as_markup()
+
+
+def plan_delete_confirm_keyboard(plan: Plan) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="✅ بله، حذف شود",
+        callback_data=AdminPlanCallback(action="delete_confirm", plan_id=plan.id),
+    )
+    builder.button(
+        text="❌ لغو",
+        callback_data=AdminPlanCallback(action="detail", plan_id=plan.id),
+    )
+    builder.adjust(2)
     return builder.as_markup()
 
 

@@ -1,9 +1,19 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_DOWN
+from html import escape
 from zoneinfo import ZoneInfo
 
-from app.models import OrderKind, OrderStatus, VPNServiceStatus, WalletTransactionStatus, WalletTransactionType
+from app.models import (
+    AffiliateCommissionStatus,
+    OrderKind,
+    OrderStatus,
+    User,
+    VPNServiceStatus,
+    WalletTransactionStatus,
+    WalletTransactionType,
+)
 from app.utils.money import format_money
 
 TEHRAN_TZ = ZoneInfo("Asia/Tehran")
@@ -46,6 +56,14 @@ WALLET_TRANSACTION_STATUS_LABELS = {
     WalletTransactionStatus.CANCELLED.value: "لغو شده",
 }
 
+COMMISSION_STATUS_LABELS = {
+    AffiliateCommissionStatus.PENDING.value: "در انتظار تایید",
+    AffiliateCommissionStatus.APPROVED.value: "تایید شده",
+    AffiliateCommissionStatus.PAID.value: "تسویه شده",
+    AffiliateCommissionStatus.CANCELLED.value: "لغو شده",
+    AffiliateCommissionStatus.REVERSED.value: "برگشت خورده",
+}
+
 
 def format_order_status_fa(status: str | None) -> str:
     return ORDER_STATUS_LABELS.get(status or "", status or "-")
@@ -65,6 +83,34 @@ def format_wallet_transaction_type_fa(transaction_type: str | None) -> str:
 
 def format_wallet_transaction_status_fa(status: str | None) -> str:
     return WALLET_TRANSACTION_STATUS_LABELS.get(status or "", status or "-")
+
+
+def format_commission_status_fa(status: str | None) -> str:
+    return COMMISSION_STATUS_LABELS.get(status or "", status or "-")
+
+
+def format_percent(value: float | int | None) -> str:
+    if value is None:
+        return "0٪"
+    number = float(value)
+    if number.is_integer():
+        return f"{int(number)}٪"
+    return f"{number:.2f}".rstrip("0").rstrip(".") + "٪"
+
+
+def format_user_display(user: User | None) -> str:
+    if user is None:
+        return "-"
+    username = f"@{user.telegram_username}" if user.telegram_username else "-"
+    name = escape(user.first_name or "-")
+    return f"{name} | {username} | {user.telegram_id}"
+
+
+def calculate_commission_amount(base_amount: int, percent: float | int) -> int:
+    if base_amount <= 0 or percent <= 0:
+        return 0
+    amount = Decimal(base_amount) * Decimal(str(percent)) / Decimal("100")
+    return int(amount.quantize(Decimal("1"), rounding=ROUND_DOWN))
 
 
 def format_datetime(value: datetime | None) -> str:

@@ -41,6 +41,7 @@ def create_dispatcher(settings: Settings) -> Dispatcher:
     dp.update.middleware(db_middleware)
 
     dp.include_router(errors.router)
+    dp.include_router(referral.router)
     dp.include_router(menu.router)
     dp.include_router(verification.router)
     dp.include_router(start.router)
@@ -50,7 +51,6 @@ def create_dispatcher(settings: Settings) -> Dispatcher:
     dp.include_router(tariffs.router)
     dp.include_router(tracking.router)
     dp.include_router(tutorials.router)
-    dp.include_router(referral.router)
     dp.include_router(wallet.router)
     dp.include_router(support.router)
     dp.include_router(admin.router)

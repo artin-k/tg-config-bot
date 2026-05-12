@@ -4,11 +4,11 @@ from datetime import datetime, timedelta, timezone
 from html import escape
 
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import Message, User as TelegramUser
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import Settings
-from app.models import Order, OrderKind, OrderStatus, VPNService
+from app.config import Settings, get_settings
+from app.models import Order, OrderKind, OrderStatus, User, VPNService
 from app.repositories.dice_rolls import DiceRollsRepository
 from app.repositories.orders import OrdersRepository
 from app.repositories.plans import PlansRepository
@@ -16,6 +16,7 @@ from app.repositories.services import ServicesRepository
 from app.repositories.test_accounts import TestAccountsRepository
 from app.repositories.users import UsersRepository
 from app.services.order_service import OrderService
+from app.services.affiliate_service import AffiliateService
 from app.utils.codes import generate_discount_code
 from app.utils.formatting import (
     format_datetime,
@@ -25,10 +26,9 @@ from app.utils.formatting import (
     format_remaining_time,
     format_service_status_fa,
 )
-from app.utils.tracking import generate_referral_code
 from bot import texts
 from bot.keyboards.buy import plans_keyboard
-from bot.keyboards.main_menu import main_menu_keyboard
+from bot.keyboards.main_menu import account_dashboard_keyboard, buy_renew_menu_keyboard, features_menu_keyboard, main_menu_keyboard
 from bot.keyboards.renewal import renewal_services_keyboard
 from bot.keyboards.services import services_actions_keyboard
 from bot.keyboards.tracking import orders_tracking_keyboard
@@ -40,6 +40,44 @@ from bot.states.wallet import VerificationStates
 
 async def show_main_menu(message: Message) -> None:
     await message.answer(texts.MAIN_MENU_TEXT, reply_markup=main_menu_keyboard())
+
+
+async def show_buy_renew_menu(message: Message) -> None:
+    await message.answer(
+        "🛒 خرید و تمدید\n\nیکی از گزینه‌های زیر را انتخاب کنید:",
+        reply_markup=buy_renew_menu_keyboard(),
+    )
+
+
+async def show_features_menu(message: Message) -> None:
+    await message.answer(
+        "🧭 منوی امکانات\n\nامکانات تکمیلی ربات از این بخش در دسترس است:",
+        reply_markup=features_menu_keyboard(),
+    )
+
+
+async def show_account_dashboard(message: Message, session: AsyncSession) -> None:
+    user = await _get_current_user(message, session)
+    if user is None:
+        await message.answer("ابتدا /start را ارسال کنید.", reply_markup=main_menu_keyboard())
+        return
+
+    direct_referrals = await UsersRepository(session).count_referrals(user.id)
+    active_services_count = len(await ServicesRepository(session).list_active_by_user(user.id))
+    recent_orders_count = await OrdersRepository(session).count_by_user(user.id)
+    phone = user.phone_number or "تایید نشده"
+
+    await message.answer(
+        f"""👤 حساب کاربری شما
+
+🆔 آیدی عددی: {user.telegram_id}
+📱 موبایل: {escape(phone)}
+🏦 موجودی کیف پول: {format_money(user.wallet_balance)} تومان
+👥 دعوت مستقیم: {direct_referrals}
+🛍 سرویس‌های فعال: {active_services_count}
+📦 سفارش‌های اخیر: {recent_orders_count}""",
+        reply_markup=account_dashboard_keyboard(phone_verified=user.is_phone_verified),
+    )
 
 
 async def show_buy_plans(message: Message, session: AsyncSession) -> None:
@@ -133,36 +171,50 @@ async def show_order_tracking(message: Message, session: AsyncSession, settings:
     await message.answer("\n".join(lines), reply_markup=orders_tracking_keyboard(orders))
 
 
-async def show_referral(message: Message, session: AsyncSession, settings: Settings) -> None:
-    user = await _get_current_user(message, session)
-    if user is None:
-        await message.answer("ابتدا /start را ارسال کنید.", reply_markup=main_menu_keyboard())
+async def show_referral(
+    message: Message,
+    session: AsyncSession,
+    settings: Settings,
+    telegram_user: TelegramUser | None = None,
+) -> None:
+    telegram_user = telegram_user or message.from_user
+    if telegram_user is None:
+        await message.answer("امکان شناسایی حساب تلگرام شما وجود ندارد. لطفاً دوباره تلاش کنید.", reply_markup=main_menu_keyboard())
         return
 
-    if not user.referral_code:
-        user.referral_code = generate_referral_code(user.telegram_id)
-        await session.commit()
+    user = await _get_or_create_user_from_telegram_user(telegram_user, session, settings)
 
+    affiliate = AffiliateService(session, settings)
     bot_info = await message.bot.get_me()
-    count = await UsersRepository(session).count_referrals(user.id)
-    reward = settings.referral_reward_amount
-    reward_line = (
-        f"💰 پاداش هر دعوت موفق: {format_money(reward)} تومان"
-        if reward > 0
-        else "در حال حاضر پاداش مالی توسط مدیریت تنظیم نشده است."
+    bot_username = bot_info.username or "bot"
+    stats = await affiliate.referral_page_stats(user)
+
+    direct_reward_line = (
+        f"پاداش مستقیم کاربران: {settings.referral_commission_percent:g}٪ از خرید موفق"
+        if settings.referral_commission_percent > 0
+        else "در حال حاضر پاداش مستقیم کاربران فعال نیست، اما دعوت‌های شما در سیستم ثبت و قابل پیگیری است."
+    )
+    footer = (
+        "برای گزارش کامل از /admin بخش مدیریت زیرمجموعه‌ها استفاده کنید."
+        if user.is_root_admin
+        else direct_reward_line
     )
 
     await message.answer(
         f"""👥 زیرمجموعه‌گیری
 
-با دعوت دوستان خود می‌توانید اعتبار هدیه دریافت کنید.
+با دعوت دوستان خود می‌توانید پاداش دریافت کنید.
 
 🔗 لینک دعوت اختصاصی شما:
-https://t.me/{bot_info.username}?start={user.referral_code}
+https://t.me/{bot_username}?start={user.referral_code}
 
-👤 تعداد زیرمجموعه‌های شما: {count}
-{reward_line}""",
-        reply_markup=main_menu_keyboard(),
+👤 تعداد دعوت مستقیم: {stats["direct_count"]}
+🛒 خریدهای موفق زیرمجموعه‌ها: {stats["successful_referral_orders"]}
+💰 پاداش کل: {format_money(stats["total_commission"])} تومان
+⏳ پاداش تسویه‌نشده: {format_money(stats["unpaid_commission"])} تومان
+
+{footer}""",
+        reply_markup=main_menu_keyboard(is_admin=user.is_admin),
     )
 
 
@@ -385,6 +437,34 @@ async def _get_current_user(message: Message, session: AsyncSession):
     if message.from_user is None:
         return None
     return await UsersRepository(session).get_by_telegram_id(message.from_user.id)
+
+
+async def get_or_create_user_from_message(message: Message, session: AsyncSession) -> User:
+    if message.from_user is None:
+        raise ValueError("message.from_user is required")
+    return await _get_or_create_user_from_telegram_user(message.from_user, session, get_settings())
+
+
+async def _get_or_create_user_from_telegram_user(
+    telegram_user: TelegramUser,
+    session: AsyncSession,
+    settings: Settings,
+) -> User:
+    try:
+        user = await UsersRepository(session).create_or_update_from_telegram(
+            telegram_id=telegram_user.id,
+            telegram_username=telegram_user.username,
+            first_name=telegram_user.first_name,
+            is_admin=telegram_user.id in settings.admin_ids,
+            is_root_admin=settings.root_admin_telegram_id == telegram_user.id,
+        )
+        if settings.root_admin_telegram_id == telegram_user.id:
+            user = await AffiliateService(session, settings).ensure_root_owner() or user
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+    return user
 
 
 async def _generate_unique_discount_code(repo: DiceRollsRepository) -> str:

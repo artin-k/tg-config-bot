@@ -45,6 +45,8 @@ async def receive_contact(
     await message.answer("✅ شماره موبایل شما با موفقیت تایید شد.")
     if data.get("next_section") == "wallet":
         await menu_actions.show_wallet(message, session)
+    elif data.get("next_section") == "account":
+        await menu_actions.show_account_dashboard(message, session)
     else:
         await menu_actions.show_main_menu(message)
 

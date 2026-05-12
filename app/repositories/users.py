@@ -17,9 +17,26 @@ class UsersRepository:
     async def get_by_referral_code(self, referral_code: str) -> User | None:
         return await self.session.scalar(select(User).where(User.referral_code == referral_code))
 
+    async def get_root_owner(self, root_telegram_id: int | None = None) -> User | None:
+        if root_telegram_id is not None:
+            user = await self.get_by_telegram_id(root_telegram_id)
+            if user is not None:
+                return user
+        return await self.session.scalar(select(User).where(User.is_root_admin.is_(True)).order_by(User.id.asc()))
+
     async def count_referrals(self, referrer_id: int) -> int:
         return int(
             await self.session.scalar(select(func.count()).select_from(User).where(User.referred_by_id == referrer_id))
+            or 0
+        )
+
+    async def count_orphans(self) -> int:
+        return int(
+            await self.session.scalar(
+                select(func.count())
+                .select_from(User)
+                .where(User.referred_by_id.is_(None), User.is_root_admin.is_(False))
+            )
             or 0
         )
 
@@ -49,6 +66,7 @@ class UsersRepository:
         ]
         if normalized.isdigit():
             conditions.append(User.telegram_id == int(normalized))
+        conditions.append(User.referral_code.ilike(f"%{normalized}%"))
         result = await self.session.scalars(select(User).where(or_(*conditions)).limit(limit))
         return list(result.all())
 
@@ -66,6 +84,7 @@ class UsersRepository:
         telegram_username: str | None,
         first_name: str | None,
         is_admin: bool,
+        is_root_admin: bool = False,
     ) -> User:
         user = await self.get_by_telegram_id(telegram_id)
         if user is None:
@@ -74,15 +93,28 @@ class UsersRepository:
                 telegram_username=telegram_username,
                 first_name=first_name,
                 referral_code=generate_referral_code(telegram_id),
-                is_admin=is_admin,
+                is_admin=bool(is_admin or is_root_admin),
+                is_root_admin=is_root_admin,
             )
             self.session.add(user)
         else:
             user.telegram_username = telegram_username
             user.first_name = first_name
-            user.is_admin = bool(user.is_admin or is_admin)
+            user.is_admin = bool(user.is_admin or is_admin or is_root_admin)
+            user.is_root_admin = bool(user.is_root_admin or is_root_admin)
             if not user.referral_code:
                 user.referral_code = generate_referral_code(telegram_id)
+
+        await self.session.flush()
+        if is_root_admin:
+            user.is_admin = True
+            user.is_root_admin = True
+            user.referred_by_id = None
+            user.referral_depth = 0
+            user.referral_path = f"/{user.id}/"
+        elif not user.referral_path:
+            user.referral_depth = user.referral_depth or 0
+            user.referral_path = f"/{user.id}/"
 
         await self.session.flush()
         return user
