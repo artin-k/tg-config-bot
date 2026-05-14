@@ -21,9 +21,5 @@ def services_actions_keyboard(services: list[VPNService]) -> InlineKeyboardMarku
             text=f"📊 وضعیت {service.username}",
             callback_data=ServiceActionCallback(action="status", service_id=service.id),
         )
-        builder.button(
-            text=f"♻️ تمدید {service.username}",
-            callback_data=ServiceActionCallback(action="renew", service_id=service.id),
-        )
     builder.adjust(1)
     return builder.as_markup()

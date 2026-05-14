@@ -70,13 +70,16 @@ async def show_plans(message: Message, session: AsyncSession) -> None:
         return
 
     counts = await ConfigInventoryRepository(session).available_counts_for_plans([plan.id for plan in plans])
-    if all(counts.get(plan.id, 0) <= 0 for plan in plans):
+    unavailable_plans = [plan for plan in plans if counts.get(plan.id, 0) <= 0]
+    if len(unavailable_plans) == len(plans):
+        for plan in unavailable_plans:
+            await notify_admins_empty_inventory_attempt(message.bot, session, plan)
         await message.answer(
             "در حال حاضر موجودی سرویس‌ها به پایان رسیده است.\nلطفاً بعداً مراجعه کنید یا با پشتیبانی در ارتباط باشید.",
             reply_markup=main_menu_keyboard(),
         )
         return
-    unavailable_lines = [f"❌ {plan.title} | ناموجود" for plan in plans if counts.get(plan.id, 0) <= 0]
+    unavailable_lines = [f"❌ {plan.title} | ناموجود" for plan in unavailable_plans]
     text = texts.BUY_PLANS_TEXT
     if unavailable_lines:
         text += "\n\n" + "\n".join(unavailable_lines)
@@ -98,8 +101,18 @@ async def buy_back_to_plans(callback: CallbackQuery, session: AsyncSession) -> N
         await session.commit()
     plans = await PlansRepository(session).list_active()
     counts = await ConfigInventoryRepository(session).available_counts_for_plans([plan.id for plan in plans])
+    unavailable_plans = [plan for plan in plans if counts.get(plan.id, 0) <= 0]
+    text = texts.BUY_PLANS_TEXT
+    if plans and len(unavailable_plans) == len(plans):
+        for plan in unavailable_plans:
+            await notify_admins_empty_inventory_attempt(callback.bot, session, plan)
+        text = "در حال حاضر موجودی سرویس‌ها به پایان رسیده است.\nلطفاً بعداً مراجعه کنید یا با پشتیبانی در ارتباط باشید."
+    else:
+        unavailable_lines = [f"❌ {plan.title} | ناموجود" for plan in unavailable_plans]
+        if unavailable_lines:
+            text += "\n\n" + "\n".join(unavailable_lines)
     if callback.message:
-        await callback.message.edit_text(texts.BUY_PLANS_TEXT, reply_markup=plans_keyboard(plans, counts))
+        await callback.message.edit_text(text, reply_markup=plans_keyboard(plans, counts))
 
 
 @router.callback_query(PlanCallback.filter())
@@ -413,7 +426,9 @@ async def pay_from_wallet(
         _approved_wallet_message(result),
         reply_markup=main_menu_keyboard(),
     )
-    if result.plan_id:
+    # Inventory belongs only to new purchases. Renewals extend the existing
+    # service/config and must not trigger low-stock or empty-stock alerts.
+    if result.order_kind == OrderKind.PURCHASE.value and result.plan_id:
         await notify_admins_low_or_empty_inventory(callback.bot, session, result.plan_id)
 
 

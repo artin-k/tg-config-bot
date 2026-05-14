@@ -83,7 +83,7 @@ async def route_main_menu_text(
 
     if text in {texts.BTN_MAIN_MENU, texts.BTN_BACK}:
         await menu_actions.show_main_menu(message)
-    elif text == texts.BTN_BUY_RENEW:
+    elif text in {texts.BTN_BUY_RENEW, "🛒 خرید و تمدید"}:
         await menu_actions.show_buy_renew_menu(message)
     elif text == texts.BTN_FEATURES:
         await menu_actions.show_features_menu(message)
@@ -94,7 +94,7 @@ async def route_main_menu_text(
     elif text == texts.BTN_BUY:
         await menu_actions.show_buy_plans(message, session)
     elif text == texts.BTN_RENEW:
-        await menu_actions.show_renewal_services(message, session)
+        await menu_actions.show_renewal_disabled(message, session)
     elif text in {texts.BTN_MY_SERVICES, "🛍 سرویس های من"}:
         await menu_actions.show_my_services(message, session)
     elif text in {texts.BTN_TARIFFS, "💰 تعرفه اشتراک ها"}:
@@ -141,7 +141,7 @@ async def main_menu_callback(
     elif action == MENU_BUY_CALLBACK:
         await menu_actions.show_buy_plans(callback.message, session)
     elif action == MENU_RENEW_CALLBACK:
-        await menu_actions.show_renewal_services(callback.message, session)
+        await menu_actions.show_renewal_disabled(callback.message, session)
     elif action == MENU_TARIFFS_CALLBACK:
         await menu_actions.show_tariffs(callback.message, session)
     elif action in {MENU_TRACK_CALLBACK, MENU_ORDERS_CALLBACK}:

@@ -47,7 +47,7 @@ async def show_main_menu(message: Message) -> None:
 
 async def show_buy_renew_menu(message: Message) -> None:
     await message.answer(
-        "🛒 خرید و تمدید\n\nیکی از گزینه‌های زیر را انتخاب کنید:",
+        "🛒 خرید اشتراک\n\nبرای خرید سرویس جدید، گزینه خرید اشتراک را انتخاب کنید.\n\nتوجه: در نسخه فعلی تمدید مستقیم سرویس فعال نیست؛ برای ادامه استفاده، لطفاً سرویس جدید خریداری کنید.",
         reply_markup=buy_renew_menu_keyboard(),
     )
 
@@ -106,21 +106,14 @@ async def show_buy_plans(message: Message, session: AsyncSession) -> None:
 
 
 async def show_renewal_services(message: Message, session: AsyncSession) -> None:
-    user = await _get_current_user(message, session)
-    if user is None:
-        await message.answer("ابتدا /start را ارسال کنید.", reply_markup=main_menu_keyboard())
-        return
+    await show_renewal_disabled(message, session)
 
-    services = await ServicesRepository(session).list_active_by_user(user.id)
-    if not services:
-        await message.answer("شما هنوز سرویس فعالی برای تمدید ندارید.", reply_markup=main_menu_keyboard())
-        return
 
+async def show_renewal_disabled(message: Message, session: AsyncSession | None = None) -> None:
     await message.answer(
-        "♻️ لطفاً سرویسی که می‌خواهید تمدید کنید را انتخاب کنید:",
-        reply_markup=renewal_services_keyboard(services),
+        "♻️ تمدید مستقیم سرویس در حال حاضر فعال نیست.\n\nبرای ادامه استفاده، لطفاً از بخش «خرید اشتراک» یک سرویس جدید تهیه کنید.",
+        reply_markup=buy_renew_menu_keyboard(),
     )
-
 
 async def show_my_services(message: Message, session: AsyncSession) -> None:
     user = await _get_current_user(message, session)

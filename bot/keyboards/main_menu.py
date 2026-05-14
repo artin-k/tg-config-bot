@@ -38,7 +38,6 @@ def main_menu_keyboard(*, is_admin: bool = False) -> ReplyKeyboardMarkup:
 def buy_renew_menu_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🔐 خرید اشتراک", callback_data=MENU_BUY_CALLBACK)
-    builder.button(text="♻️ تمدید سرویس", callback_data=MENU_RENEW_CALLBACK)
     builder.button(text="💰 مشاهده تعرفه‌ها", callback_data=MENU_TARIFFS_CALLBACK)
     builder.button(text=texts.BTN_BACK, callback_data=MENU_MAIN_CALLBACK)
     builder.adjust(1)

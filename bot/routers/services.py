@@ -21,7 +21,7 @@ async def my_services(message: Message, state: FSMContext, session: AsyncSession
     await menu_actions.show_my_services(message, session)
 
 
-@router.callback_query(ServiceActionCallback.filter(F.action.in_({"link", "status"})))
+@router.callback_query(ServiceActionCallback.filter(F.action.in_({"link", "status", "renew"})))
 async def service_action(
     callback: CallbackQuery,
     callback_data: ServiceActionCallback,
@@ -39,6 +39,13 @@ async def service_action(
     service = await ServicesRepository(session).get_user_service(callback_data.service_id, user.id)
     if service is None:
         await _safe_answer(callback, "این سرویس پیدا نشد یا متعلق به حساب شما نیست.")
+        return
+
+    if callback_data.action == "renew":
+        await _safe_answer(
+            callback,
+            "♻️ تمدید مستقیم سرویس در حال حاضر فعال نیست.\n\nبرای ادامه استفاده، لطفاً از بخش «خرید اشتراک» یک سرویس جدید تهیه کنید.",
+        )
         return
 
     if callback_data.action == "link":

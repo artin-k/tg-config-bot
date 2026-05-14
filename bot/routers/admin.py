@@ -682,11 +682,13 @@ async def admin_payment_action(
             )
             if result.waiting_inventory:
                 await callback.answer("❌ موجودی کانفیگ برای این تعرفه تمام شده است. ابتدا موجودی را شارژ کنید.", show_alert=True)
-                if result.plan_id:
+                if result.order_kind == OrderKind.PURCHASE.value and result.plan_id:
                     await notify_admins_low_or_empty_inventory(callback.bot, session, result.plan_id)
             else:
                 await callback.answer("پرداخت تایید شد.")
-                if result.plan_id:
+                # Inventory belongs only to new purchases. Renewals extend the existing
+                # service/config and must not trigger low-stock or empty-stock alerts.
+                if result.order_kind == OrderKind.PURCHASE.value and result.plan_id:
                     await notify_admins_low_or_empty_inventory(callback.bot, session, result.plan_id)
             await _remove_admin_buttons(callback)
         elif callback_data.action == "reject":
@@ -769,7 +771,7 @@ async def admin_plan_action(
 
     action = callback_data.action
     if action == "detail":
-        await _show_plan_detail(callback, plan)
+        await _show_plan_detail(callback, plan, session)
         return
 
     if action in EDIT_FIELD_MAP:
@@ -784,7 +786,7 @@ async def admin_plan_action(
         await plans_repo.set_active(plan.id, not plan.is_active)
         await session.commit()
         refreshed = await plans_repo.get(plan.id)
-        await _show_plan_detail(callback, refreshed)
+        await _show_plan_detail(callback, refreshed, session)
         return
 
     if action == "delete":
@@ -808,7 +810,8 @@ async def admin_plan_action(
             await plans_repo.set_active(plan.id, False)
             await session.commit()
             refreshed = await plans_repo.get(plan.id)
-            detail = _format_plan_detail(refreshed) if refreshed is not None else ""
+            available_count = await get_available_count(session, refreshed.id) if refreshed is not None else None
+            detail = _format_plan_detail(refreshed, available_count) if refreshed is not None else ""
             await _safe_edit_or_answer(
                 callback,
                 f"این تعرفه سفارش یا سرویس ثبت‌شده دارد؛ حذف کامل ممکن نیست و به‌جای آن غیرفعال شد.\n\n{detail}",
@@ -1087,8 +1090,9 @@ async def edit_plan_value(message: Message, state: FSMContext, session: AsyncSes
     if plan is None:
         await message.answer("تعرفه پیدا نشد.", reply_markup=admin_main_keyboard())
         return
+    available_count = await get_available_count(session, plan.id)
     await message.answer("✅ تعرفه به‌روزرسانی شد.")
-    await message.answer(_format_plan_detail(plan), reply_markup=plan_detail_keyboard(plan))
+    await message.answer(_format_plan_detail(plan, available_count), reply_markup=plan_detail_keyboard(plan))
 
 
 @router.message(AdminAddTestAccountStates.title)
@@ -1542,7 +1546,7 @@ async def _save_add_plan(callback: CallbackQuery, state: FSMContext, session: As
     await state.clear()
     if callback.message:
         await callback.message.answer(
-            f"✅ تعرفه جدید ذخیره شد.\n\n{_format_plan_detail(plan)}",
+            f"✅ تعرفه جدید ذخیره شد.\n\n{_format_plan_detail(plan, 0)}",
             reply_markup=plan_detail_keyboard(plan),
         )
 
@@ -1620,13 +1624,20 @@ async def _show_inventory_summary(callback: CallbackQuery, session: AsyncSession
     lines = ["📊 خلاصه موجودی کانفیگ‌ها"]
     for plan in plans:
         plan_counts = counts.get(plan.id, {})
+        available_count = plan_counts.get(ConfigInventoryStatus.AVAILABLE.value, 0)
+        plan_status = "🟢 تعرفه فعال" if plan.is_active else "🔴 تعرفه غیرفعال"
+        purchase_status = "✅ وضعیت خرید: قابل خرید" if plan.is_active and available_count > 0 else "❌ وضعیت خرید: ناموجود"
+        if not plan.is_active:
+            purchase_status = "⛔ وضعیت خرید: غیرفعال توسط ادمین"
         lines.append(
             f"""
 ⚡ {escape(plan.title)}
-🟢 آماده فروش: {plan_counts.get(ConfigInventoryStatus.AVAILABLE.value, 0)}
+📌 وضعیت تعرفه: {plan_status}
+🟢 آماده فروش: {available_count}
 🟡 رزرو شده: {plan_counts.get(ConfigInventoryStatus.RESERVED.value, 0)}
 🔴 فروخته شده: {plan_counts.get(ConfigInventoryStatus.SOLD.value, 0)}
-⚫ غیرفعال: {plan_counts.get(ConfigInventoryStatus.DISABLED.value, 0)}"""
+⚫ غیرفعال: {plan_counts.get(ConfigInventoryStatus.DISABLED.value, 0)}
+{purchase_status}"""
         )
     await _safe_edit_or_answer(callback, "\n".join(lines), reply_markup=inventory_main_keyboard())
 
@@ -2331,11 +2342,14 @@ def _format_setting_value(key: str, value: str | int | None) -> str:
     return escape(str(value if value is not None else ""))
 
 
-async def _show_plan_detail(callback: CallbackQuery, plan) -> None:
+async def _show_plan_detail(callback: CallbackQuery, plan, session: AsyncSession | None = None) -> None:
     if plan is None:
         await _safe_edit_or_answer(callback, "تعرفه پیدا نشد.")
         return
-    await _safe_edit_or_answer(callback, _format_plan_detail(plan), reply_markup=plan_detail_keyboard(plan))
+    available_count = None
+    if session is not None:
+        available_count = await get_available_count(session, plan.id)
+    await _safe_edit_or_answer(callback, _format_plan_detail(plan, available_count), reply_markup=plan_detail_keyboard(plan))
 
 
 async def _is_admin(telegram_id: int | None, session: AsyncSession, settings: Settings) -> bool:
@@ -2421,13 +2435,20 @@ async def _guard_settings_message(message: Message, state: FSMContext, session: 
     return True
 
 
-def _format_plan_detail(plan) -> str:
+def _format_plan_detail(plan, available_count: int | None = None) -> str:
     status = "🟢 فعال" if plan.is_active else "🔴 غیرفعال"
+    if available_count is None:
+        inventory_status = "نامشخص"
+    elif available_count > 0:
+        inventory_status = f"✅ موجود | آماده فروش: {available_count}"
+    else:
+        inventory_status = "❌ ناموجود | آماده فروش: 0"
     description = plan.description or "-"
     return f"""📦 جزئیات تعرفه
 
 🆔 شناسه: {plan.id}
-📌 وضعیت: {status}
+📌 وضعیت تعرفه: {status}
+📦 وضعیت موجودی: {inventory_status}
 ⚡ عنوان: {escape(plan.title)}
 📝 توضیحات: {escape(description)}
 📦 حجم: {plan.volume_gb} گیگ

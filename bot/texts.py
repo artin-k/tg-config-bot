@@ -1,4 +1,4 @@
-BTN_BUY_RENEW = "🛒 خرید و تمدید"
+BTN_BUY_RENEW = "🛒 خرید اشتراک"
 BTN_BUY = "🔐 خرید اشتراک"
 BTN_RENEW = "♻️ تمدید سرویس"
 BTN_TEST_ACCOUNT = "🔑 اکانت تست"
@@ -24,6 +24,7 @@ REFERRAL_BUTTON_TEXTS = {
 
 MAIN_MENU_BUTTONS = {
     BTN_BUY_RENEW,
+    "🛒 خرید و تمدید",
     BTN_BUY,
     BTN_RENEW,
     BTN_TEST_ACCOUNT,
