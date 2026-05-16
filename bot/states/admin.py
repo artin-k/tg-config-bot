@@ -39,6 +39,10 @@ class AdminWalletAdjustStates(StatesGroup):
     amount = State()
 
 
+class AdminWithdrawalStates(StatesGroup):
+    reject_reason = State()
+
+
 class AdminServiceEditStates(StatesGroup):
     value = State()
 

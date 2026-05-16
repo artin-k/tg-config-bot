@@ -1,10 +1,12 @@
 from aiogram import F, Router
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.repositories.users import UsersRepository
+from app.utils.admin_access import is_user_admin
 from bot import menu_actions, texts
 from bot.keyboards.admin import admin_main_keyboard
 from bot.keyboards.main_menu import (
@@ -59,6 +61,17 @@ async def main_menu_text(
     await handle_main_menu_text(message, state, session, settings)
 
 
+@router.message(Command("admin"))
+async def admin_command(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    await state.clear()
+    await _show_admin_panel_from_menu(message, session, settings)
+
+
 async def handle_main_menu_text(
     message: Message,
     state: FSMContext,
@@ -82,7 +95,7 @@ async def route_main_menu_text(
     text = (message.text or "").strip()
 
     if text in {texts.BTN_MAIN_MENU, texts.BTN_BACK}:
-        await menu_actions.show_main_menu(message)
+        await menu_actions.show_main_menu(message, session, settings)
     elif text in {texts.BTN_BUY_RENEW, "🛒 خرید و تمدید"}:
         await menu_actions.show_buy_renew_menu(message)
     elif text == texts.BTN_FEATURES:
@@ -114,7 +127,7 @@ async def route_main_menu_text(
     elif text == texts.BTN_LUCKY_WHEEL:
         await menu_actions.show_lucky_wheel(message, session, settings)
     else:
-        await menu_actions.show_main_menu(message)
+        await menu_actions.show_main_menu(message, session, settings)
 
 
 @router.callback_query(F.data.in_(MENU_CALLBACKS))
@@ -131,7 +144,11 @@ async def main_menu_callback(
     action = callback.data
     if action == MENU_MAIN_CALLBACK:
         await state.clear()
-        await callback.message.answer(texts.MAIN_MENU_TEXT, reply_markup=main_menu_keyboard())
+        user = await UsersRepository(session).get_by_telegram_id(callback.from_user.id) if callback.from_user else None
+        await callback.message.answer(
+            texts.MAIN_MENU_TEXT,
+            reply_markup=main_menu_keyboard(is_admin=is_user_admin(user, settings)),
+        )
     elif action == MENU_BUY_RENEW_CALLBACK:
         await menu_actions.show_buy_renew_menu(callback.message)
     elif action == MENU_FEATURES_CALLBACK:
@@ -174,7 +191,7 @@ async def _show_admin_panel_from_menu(message: Message, session: AsyncSession, s
     is_admin = (
         message.from_user.id in settings.admin_ids
         or message.from_user.id == settings.root_admin_telegram_id
-        or bool(user and user.is_admin)
+        or is_user_admin(user, settings)
     )
     if not is_admin:
         await message.answer("⛔ شما دسترسی مدیریت ندارید.")

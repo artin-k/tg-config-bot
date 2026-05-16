@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.repositories.users import UsersRepository
 from app.services.affiliate_service import AffiliateService
+from app.utils.admin_access import is_user_admin
 from bot import texts
 from bot.keyboards.common import BACK_TO_MAIN_CALLBACK
 from bot.keyboards.main_menu import main_menu_keyboard
@@ -38,20 +39,22 @@ async def start(message: Message, session: AsyncSession, settings: Settings) -> 
 
     await message.answer(
         texts.welcome_text(message.from_user.first_name),
-        reply_markup=main_menu_keyboard(is_admin=user.is_admin),
+        reply_markup=main_menu_keyboard(is_admin=is_user_admin(user, settings)),
     )
 
 
 @router.message(F.text == texts.BTN_BACK)
-async def back_to_main(message: Message) -> None:
-    await message.answer(texts.MAIN_MENU_TEXT, reply_markup=main_menu_keyboard())
+async def back_to_main(message: Message, session: AsyncSession, settings: Settings) -> None:
+    user = await UsersRepository(session).get_by_telegram_id(message.from_user.id) if message.from_user else None
+    await message.answer(texts.MAIN_MENU_TEXT, reply_markup=main_menu_keyboard(is_admin=is_user_admin(user, settings)))
 
 
 @router.callback_query(F.data == BACK_TO_MAIN_CALLBACK)
-async def back_to_main_callback(callback: CallbackQuery) -> None:
+async def back_to_main_callback(callback: CallbackQuery, session: AsyncSession, settings: Settings) -> None:
     await callback.answer()
     if callback.message:
-        await callback.message.answer(texts.MAIN_MENU_TEXT, reply_markup=main_menu_keyboard())
+        user = await UsersRepository(session).get_by_telegram_id(callback.from_user.id) if callback.from_user else None
+        await callback.message.answer(texts.MAIN_MENU_TEXT, reply_markup=main_menu_keyboard(is_admin=is_user_admin(user, settings)))
 
 
 def _extract_referral_code(text: str | None) -> str | None:

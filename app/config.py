@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     dice_discount_expire_hours: int = Field(default=72, alias="DICE_DISCOUNT_EXPIRE_HOURS")
     allow_placeholder_configs: bool = Field(default=False, alias="ALLOW_PLACEHOLDER_CONFIGS")
     config_low_stock_threshold: int = Field(default=3, alias="CONFIG_LOW_STOCK_THRESHOLD")
+    wallet_min_withdraw_amount: int = Field(default=100000, alias="WALLET_MIN_WITHDRAW_AMOUNT")
+    wallet_max_withdraw_amount: int = Field(default=0, alias="WALLET_MAX_WITHDRAW_AMOUNT")
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -115,6 +117,17 @@ class Settings(BaseSettings):
             parsed = int(str(value).strip())
         except ValueError:
             return 3
+        return max(parsed, 0)
+
+    @field_validator("wallet_min_withdraw_amount", "wallet_max_withdraw_amount", mode="before")
+    @classmethod
+    def normalize_wallet_withdraw_amount(cls, value: object) -> int:
+        if value is None:
+            return 0
+        try:
+            parsed = int(str(value).strip().replace(",", ""))
+        except ValueError:
+            return 0
         return max(parsed, 0)
 
     @field_validator("commission_base", mode="after")

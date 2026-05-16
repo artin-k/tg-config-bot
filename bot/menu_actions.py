@@ -20,6 +20,7 @@ from app.services.order_service import OrderService
 from app.services.affiliate_service import AffiliateService
 from app.services.inventory_service import release_expired_reservations
 from app.services.settings_service import AppSettingsService
+from app.utils.admin_access import is_user_admin
 from app.utils.codes import generate_discount_code
 from app.utils.formatting import (
     format_datetime,
@@ -41,8 +42,16 @@ from bot.keyboards.wallet import wallet_keyboard
 from bot.states.wallet import VerificationStates
 
 
-async def show_main_menu(message: Message) -> None:
-    await message.answer(texts.MAIN_MENU_TEXT, reply_markup=main_menu_keyboard())
+async def show_main_menu(
+    message: Message,
+    session: AsyncSession | None = None,
+    settings: Settings | None = None,
+) -> None:
+    user = await _get_current_user(message, session) if session is not None else None
+    await message.answer(
+        texts.MAIN_MENU_TEXT,
+        reply_markup=main_menu_keyboard(is_admin=bool(settings and is_user_admin(user, settings))),
+    )
 
 
 async def show_buy_renew_menu(message: Message) -> None:
@@ -227,7 +236,7 @@ https://t.me/{bot_username}?start={user.referral_code}
 ⏳ پاداش تسویه‌نشده: {format_money(stats["unpaid_commission"])} تومان
 
 {footer}""",
-        reply_markup=main_menu_keyboard(is_admin=user.is_admin),
+        reply_markup=main_menu_keyboard(is_admin=is_user_admin(user, settings)),
     )
 
 

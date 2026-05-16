@@ -48,7 +48,7 @@ async def receive_contact(
     elif data.get("next_section") == "account":
         await menu_actions.show_account_dashboard(message, session)
     else:
-        await menu_actions.show_main_menu(message)
+        await menu_actions.show_main_menu(message, session, settings)
 
 
 @router.message(VerificationStates.waiting_contact, F.text)

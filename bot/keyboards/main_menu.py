@@ -20,18 +20,34 @@ MENU_ORDERS_CALLBACK = "menu:orders"
 MENU_VERIFY_PHONE_CALLBACK = "menu:verify_phone"
 
 
-def main_menu_keyboard(*, is_admin: bool = False) -> ReplyKeyboardMarkup:
+def main_menu_keyboard(user_or_is_admin: object = False, *, is_admin: bool | None = None) -> ReplyKeyboardMarkup:
+    admin = _resolve_admin_flag(user_or_is_admin, is_admin)
     rows = [
         [texts.BTN_BUY_RENEW, texts.BTN_MY_SERVICES],
         [texts.BTN_ACCOUNT, texts.BTN_SUPPORT],
         [texts.BTN_FEATURES],
     ]
-    if is_admin:
+    if admin:
         rows.append([texts.BTN_ADMIN_PANEL])
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=item) for item in row] for row in rows],
         resize_keyboard=True,
         input_field_placeholder="یکی از گزینه‌ها را انتخاب کنید",
+    )
+
+
+def compact_main_keyboard(user_or_is_admin: object = False, *, is_admin: bool | None = None) -> ReplyKeyboardMarkup:
+    return main_menu_keyboard(user_or_is_admin, is_admin=is_admin)
+
+
+def _resolve_admin_flag(user_or_is_admin: object, is_admin: bool | None) -> bool:
+    if is_admin is not None:
+        return bool(is_admin)
+    if isinstance(user_or_is_admin, bool):
+        return user_or_is_admin
+    return bool(
+        getattr(user_or_is_admin, "is_admin", False)
+        or getattr(user_or_is_admin, "is_root_admin", False)
     )
 
 

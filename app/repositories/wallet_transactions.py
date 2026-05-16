@@ -70,6 +70,7 @@ class WalletTransactionsRepository:
         description: str | None = None,
         related_order_id: int | None = None,
         related_payment_id: int | None = None,
+        related_withdrawal_id: int | None = None,
         approved_at: datetime | None = None,
     ) -> WalletTransaction:
         transaction = WalletTransaction(
@@ -80,6 +81,7 @@ class WalletTransactionsRepository:
             description=description,
             related_order_id=related_order_id,
             related_payment_id=related_payment_id,
+            related_withdrawal_id=related_withdrawal_id,
             approved_at=approved_at,
         )
         self.session.add(transaction)

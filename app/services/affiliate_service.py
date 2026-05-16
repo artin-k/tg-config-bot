@@ -18,7 +18,10 @@ from app.models import (
     OrderStatus,
     PaymentStatus,
     User,
+    WalletTransactionStatus,
+    WalletTransactionType,
 )
+from app.repositories.wallet_transactions import WalletTransactionsRepository
 from app.repositories.users import UsersRepository
 from app.utils.formatting import calculate_commission_amount
 from app.utils.tracking import generate_referral_code
@@ -646,14 +649,25 @@ class AffiliateService:
             base_amount=base_amount,
             percent=float(percent),
             commission_amount=commission_amount,
-            status=AffiliateCommissionStatus.APPROVED.value,
+            status=AffiliateCommissionStatus.PAID.value,
             description=description,
             approved_at=now,
+            paid_at=now,
         )
-        beneficiary.affiliate_balance += commission_amount
+        beneficiary.wallet_balance += commission_amount
         beneficiary.affiliate_total_earned += commission_amount
+        beneficiary.affiliate_total_paid += commission_amount
         self.session.add(commission)
         await self.session.flush()
+        await WalletTransactionsRepository(self.session).create(
+            user_id=beneficiary.id,
+            amount=commission_amount,
+            type=WalletTransactionType.REFERRAL_REWARD.value,
+            status=WalletTransactionStatus.APPROVED.value,
+            description="کمیسیون زیرمجموعه‌گیری",
+            related_order_id=order.id,
+            approved_at=now,
+        )
         logger.info(
             "affiliate_commission_created",
             commission_id=commission.id,

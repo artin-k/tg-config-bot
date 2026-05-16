@@ -7,10 +7,11 @@ from aiogram import Bot
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.models import Order, OrderKind, Payment, WalletTransaction
+from app.models import Order, OrderKind, Payment, WalletTransaction, WalletWithdrawalRequest
 from app.repositories.users import UsersRepository
 from app.utils.formatting import format_money, format_order_type_fa
-from bot.keyboards.admin import payment_review_keyboard
+from app.utils.withdrawals import format_withdrawal_destination_fa, mask_destination
+from bot.keyboards.admin import payment_review_keyboard, wallet_withdrawal_review_keyboard
 from bot.keyboards.wallet import wallet_topup_review_keyboard
 
 logger = structlog.get_logger(__name__)
@@ -95,6 +96,30 @@ async def notify_admins_wallet_topup(
     return sent_count
 
 
+async def notify_admins_wallet_withdrawal(
+    *,
+    bot: Bot,
+    session: AsyncSession,
+    settings: Settings,
+    withdrawal: WalletWithdrawalRequest,
+) -> int:
+    text = format_wallet_withdrawal_admin_text(withdrawal)
+    sent_count = 0
+    for admin_id in await get_admin_ids(session, settings):
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=text,
+                reply_markup=wallet_withdrawal_review_keyboard(withdrawal.id),
+            )
+            sent_count += 1
+        except Exception as exc:
+            logger.warning("admin_wallet_withdrawal_message_failed", admin_id=admin_id, error=str(exc))
+    if sent_count == 0:
+        logger.warning("no_admin_notified_for_wallet_withdrawal", withdrawal_id=withdrawal.id)
+    return sent_count
+
+
 def format_order_payment_admin_caption(order: Order, payment: Payment) -> str:
     user = order.user
     username = f"@{user.telegram_username}" if user.telegram_username else "-"
@@ -129,3 +154,22 @@ def format_wallet_topup_admin_caption(transaction: WalletTransaction) -> str:
 🆔 آیدی عددی: {user.telegram_id}
 📱 موبایل: {escape(user.phone_number or "-")}
 💵 مبلغ: {format_money(transaction.amount)} تومان"""
+
+
+def format_wallet_withdrawal_admin_text(withdrawal: WalletWithdrawalRequest) -> str:
+    user = withdrawal.user
+    username = f"@{user.telegram_username}" if user.telegram_username else "-"
+    return f"""💸 درخواست برداشت جدید
+
+👤 کاربر: {escape(user.first_name or "-")}
+🔗 یوزرنیم: {escape(username)}
+🆔 آیدی عددی: {user.telegram_id}
+📱 موبایل: {escape(user.phone_number or "-")}
+
+💵 مبلغ برداشت: {format_money(withdrawal.amount)} تومان
+روش دریافت: {format_withdrawal_destination_fa(withdrawal.destination_type)}
+شماره مقصد: {escape(mask_destination(withdrawal.destination_type, withdrawal.destination_number))}
+نام صاحب حساب: {escape(withdrawal.account_holder_name or "-")}
+توضیحات کاربر: {escape(withdrawal.user_note or "-")}
+
+وضعیت: در انتظار بررسی"""

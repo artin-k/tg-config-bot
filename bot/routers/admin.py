@@ -26,6 +26,8 @@ from app.models import (
     VPNServiceStatus,
     WalletTransactionStatus,
     WalletTransactionType,
+    WalletWithdrawalRequest,
+    WalletWithdrawalStatus,
 )
 from app.repositories.config_inventory import ConfigInventoryRepository
 from app.repositories.dice_rolls import DiceRollsRepository
@@ -36,6 +38,7 @@ from app.repositories.services import ServicesRepository
 from app.repositories.test_accounts import TestAccountsRepository
 from app.repositories.users import UsersRepository
 from app.repositories.wallet_transactions import WalletTransactionsRepository
+from app.repositories.wallet_withdrawals import WalletWithdrawalsRepository
 from app.services.order_status import order_kind_label
 from app.services.affiliate_service import AffiliateService
 from app.services.inventory_service import (
@@ -63,11 +66,18 @@ from app.services.settings_service import (
     SETTING_DEFINITIONS,
     SUPPORT_USERNAME,
     WALLET_MAX_TOPUP_AMOUNT,
+    WALLET_MAX_WITHDRAW_AMOUNT,
     WALLET_MIN_TOPUP_AMOUNT,
+    WALLET_MIN_WITHDRAW_AMOUNT,
     AppSettingsService,
     SettingValidationError,
 )
 from app.services.wallet_service import WalletService, WalletTopupAlreadyProcessedError, WalletTopupError
+from app.services.wallet_withdrawal_service import (
+    WalletWithdrawalAlreadyProcessedError,
+    WalletWithdrawalError,
+    WalletWithdrawalService,
+)
 from app.services.vpn_panel import VPNPanelService
 from app.utils.formatting import (
     format_commission_status_fa,
@@ -78,6 +88,11 @@ from app.utils.formatting import (
     format_service_status_fa,
     format_user_display,
     format_wallet_transaction_status_fa,
+)
+from app.utils.withdrawals import (
+    format_withdrawal_destination_fa,
+    format_withdrawal_status_fa,
+    mask_destination,
 )
 from bot import texts
 from bot.keyboards.admin import (
@@ -90,6 +105,7 @@ from bot.keyboards.admin import (
     AdminSettingCallback,
     AdminTestAccountCallback,
     AdminUserCallback,
+    AdminWithdrawalCallback,
     add_plan_confirm_keyboard,
     add_test_account_confirm_keyboard,
     admin_communications_keyboard,
@@ -126,6 +142,8 @@ from bot.keyboards.admin import (
     test_accounts_keyboard,
     user_detail_keyboard,
     users_admin_keyboard,
+    wallet_withdrawal_review_keyboard,
+    wallet_withdrawals_keyboard,
     wallet_topups_keyboard,
 )
 from bot.keyboards.main_menu import main_menu_keyboard
@@ -144,6 +162,7 @@ from bot.states.admin import (
     AdminServiceEditStates,
     AdminSettingsStates,
     AdminWalletAdjustStates,
+    AdminWithdrawalStates,
 )
 
 router = Router(name="admin")
@@ -188,7 +207,7 @@ async def admin_action(
         await state.clear()
         if action == "back":
             if callback.message:
-                await callback.message.answer(texts.MAIN_MENU_TEXT, reply_markup=main_menu_keyboard())
+                await callback.message.answer(texts.MAIN_MENU_TEXT, reply_markup=main_menu_keyboard(is_admin=True))
         elif callback.message:
             await callback.message.edit_text(texts.ADMIN_PANEL_TEXT, reply_markup=admin_main_keyboard())
         return
@@ -236,6 +255,11 @@ async def admin_action(
     if action == "wallet_topups":
         await state.clear()
         await _show_pending_wallet_topups(callback, session)
+        return
+
+    if action == "wallet_withdrawals":
+        await state.clear()
+        await _show_wallet_withdrawals(callback, session)
         return
 
     if action == "plans":
@@ -748,6 +772,64 @@ async def admin_wallet_topup_action(
         await callback.answer("این درخواست قبلاً بررسی شده است.", show_alert=True)
     except WalletTopupError:
         await callback.answer("این درخواست دیگر معتبر نیست.", show_alert=True)
+
+
+@router.callback_query(AdminWithdrawalCallback.filter())
+async def admin_withdrawal_action(
+    callback: CallbackQuery,
+    callback_data: AdminWithdrawalCallback,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    if not await _is_admin(callback.from_user.id if callback.from_user else None, session, settings):
+        await callback.answer("⛔ شما دسترسی مدیریت ندارید.", show_alert=True)
+        return
+
+    await callback.answer()
+    admin_user = await _ensure_admin_user_record(callback.from_user, session, settings)
+    action = callback_data.action
+
+    if action == "detail":
+        await state.clear()
+        await _show_withdrawal_detail(callback, session, callback_data.withdrawal_id)
+        return
+
+    if action == "pay":
+        await state.clear()
+        try:
+            result = await WalletWithdrawalService(session).mark_paid(
+                callback_data.withdrawal_id,
+                admin_user_id=admin_user.id if admin_user else None,
+            )
+        except WalletWithdrawalAlreadyProcessedError:
+            await callback.answer("این درخواست قبلاً بررسی شده است.", show_alert=True)
+            return
+        except WalletWithdrawalError:
+            await callback.answer("این درخواست پیدا نشد.", show_alert=True)
+            return
+        await callback.bot.send_message(
+            chat_id=result.user_telegram_id,
+            text=f"""✅ درخواست برداشت شما پرداخت شد.
+
+💵 مبلغ: {format_money(result.amount)} تومان
+🧾 کد درخواست: {result.withdrawal.id}""",
+        )
+        await callback.answer("درخواست برداشت پرداخت شد.")
+        await _remove_admin_buttons(callback)
+        return
+
+    if action == "reject":
+        await state.set_state(AdminWithdrawalStates.reject_reason)
+        await state.update_data(withdrawal_id=callback_data.withdrawal_id)
+        if callback.message:
+            await callback.message.answer(
+                """دلیل رد درخواست را ارسال کنید.
+برای بدون توضیح، - را ارسال کنید:"""
+            )
+        return
+
+    await callback.answer("عملیات نامعتبر است.", show_alert=True)
 
 
 @router.callback_query(AdminPlanCallback.filter())
@@ -1290,6 +1372,47 @@ async def admin_wallet_adjust(message: Message, state: FSMContext, session: Asyn
     await session.commit()
     await state.clear()
     await message.answer(f"✅ موجودی کاربر به‌روزرسانی شد.\nموجودی جدید: {format_money(user.wallet_balance)} تومان")
+
+
+@router.message(AdminWithdrawalStates.reject_reason)
+async def admin_withdrawal_reject_reason(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    if not await _guard_admin_message(message, state, session, settings):
+        return
+    data = await state.get_data()
+    withdrawal_id = int(data.get("withdrawal_id") or 0)
+    reason_text = (message.text or "").strip()
+    reason = None if reason_text == "-" else reason_text
+    admin_user = await UsersRepository(session).get_by_telegram_id(message.from_user.id) if message.from_user else None
+    try:
+        result = await WalletWithdrawalService(session).reject(
+            withdrawal_id,
+            admin_user_id=admin_user.id if admin_user else None,
+            admin_note=reason,
+        )
+    except WalletWithdrawalAlreadyProcessedError:
+        await state.clear()
+        await message.answer("این درخواست قبلاً بررسی شده است.", reply_markup=admin_main_keyboard())
+        return
+    except WalletWithdrawalError:
+        await state.clear()
+        await message.answer("درخواست برداشت پیدا نشد.", reply_markup=admin_main_keyboard())
+        return
+
+    reason_line = reason or "بدون توضیح"
+    await message.bot.send_message(
+        chat_id=result.user_telegram_id,
+        text=f"""❌ درخواست برداشت شما رد شد.
+
+💵 مبلغ برگشتی به کیف پول: {format_money(result.amount)} تومان
+دلیل: {escape(reason_line)}""",
+    )
+    await state.clear()
+    await message.answer("✅ درخواست برداشت رد شد و مبلغ به کیف پول کاربر برگشت.", reply_markup=admin_main_keyboard())
 
 
 @router.message(AdminServiceEditStates.value)
@@ -2072,6 +2195,66 @@ async def _show_pending_wallet_topups(callback: CallbackQuery, session: AsyncSes
     await _safe_edit_or_answer(callback, text, reply_markup=wallet_topups_keyboard(transactions))
 
 
+async def _show_wallet_withdrawals(callback: CallbackQuery, session: AsyncSession) -> None:
+    repo = WalletWithdrawalsRepository(session)
+    pending = await repo.list_pending(limit=10)
+    recent = await repo.list_recent(limit=10)
+    if not pending and not recent:
+        await _safe_edit_or_answer(callback, "درخواست برداشتی ثبت نشده است.", reply_markup=admin_payments_keyboard())
+        return
+
+    lines = ["💸 درخواست‌های برداشت"]
+    if pending:
+        lines.append("\nدر انتظار بررسی:")
+        for withdrawal in pending:
+            lines.append(_format_withdrawal_list_item(withdrawal))
+    else:
+        lines.append("\nدرخواست در انتظار بررسی وجود ندارد.")
+
+    recent_without_pending = [item for item in recent if item.id not in {withdrawal.id for withdrawal in pending}]
+    if recent_without_pending:
+        lines.append("\nآخرین درخواست‌ها:")
+        for withdrawal in recent_without_pending[:5]:
+            user = withdrawal.user
+            lines.append(
+                f"""
+🧾 کد: {withdrawal.id}
+👤 کاربر: {escape(user.first_name or "-")} | {user.telegram_id}
+💵 مبلغ: {format_money(withdrawal.amount)} تومان
+📌 وضعیت: {format_withdrawal_status_fa(withdrawal.status)}
+🗓 تاریخ: {format_datetime(withdrawal.created_at)}"""
+            )
+
+    keyboard_items = pending + recent_without_pending[:5]
+    await _safe_edit_or_answer(callback, "\n".join(lines), reply_markup=wallet_withdrawals_keyboard(keyboard_items))
+
+
+async def _show_withdrawal_detail(callback: CallbackQuery, session: AsyncSession, withdrawal_id: int) -> None:
+    withdrawal = await WalletWithdrawalsRepository(session).get_with_details(withdrawal_id)
+    if withdrawal is None:
+        await _safe_edit_or_answer(callback, "درخواست برداشت پیدا نشد.", reply_markup=admin_payments_keyboard())
+        return
+
+    reply_markup = (
+        wallet_withdrawal_review_keyboard(withdrawal.id)
+        if withdrawal.status == WalletWithdrawalStatus.PENDING.value
+        else admin_payments_keyboard()
+    )
+    await _safe_edit_or_answer(callback, _format_withdrawal_detail(withdrawal), reply_markup=reply_markup)
+
+
+def _format_withdrawal_list_item(withdrawal: WalletWithdrawalRequest) -> str:
+    user = withdrawal.user
+    return f"""
+🧾 کد: {withdrawal.id}
+👤 کاربر: {escape(user.first_name or "-")} | {user.telegram_id}
+📱 موبایل: {escape(user.phone_number or "-")}
+💵 مبلغ: {format_money(withdrawal.amount)} تومان
+روش دریافت: {format_withdrawal_destination_fa(withdrawal.destination_type)}
+شماره مقصد: {escape(mask_destination(withdrawal.destination_type, withdrawal.destination_number))}
+🗓 تاریخ: {format_datetime(withdrawal.created_at)}"""
+
+
 async def _show_plans(callback: CallbackQuery, session: AsyncSession, prefix: str = "") -> None:
     plans = await PlansRepository(session).list_all()
     if not plans:
@@ -2228,6 +2411,28 @@ def _format_commission_item(commission: AffiliateCommission) -> str:
 🗓 تاریخ: {format_datetime(commission.created_at)}"""
 
 
+def _format_withdrawal_detail(withdrawal: WalletWithdrawalRequest) -> str:
+    user = withdrawal.user
+    username = f"@{user.telegram_username}" if user.telegram_username else "-"
+    return f"""💸 جزئیات درخواست برداشت
+
+🧾 کد درخواست: {withdrawal.id}
+👤 کاربر: {escape(user.first_name or "-")}
+🔗 یوزرنیم: {escape(username)}
+🆔 آیدی عددی: {user.telegram_id}
+📱 موبایل: {escape(user.phone_number or "-")}
+
+💵 مبلغ: {format_money(withdrawal.amount)} تومان
+روش دریافت: {format_withdrawal_destination_fa(withdrawal.destination_type)}
+شماره مقصد: {escape(withdrawal.destination_number)}
+نام صاحب حساب: {escape(withdrawal.account_holder_name or "-")}
+توضیحات کاربر: {escape(withdrawal.user_note or "-")}
+توضیحات مدیریت: {escape(withdrawal.admin_note or "-")}
+
+وضعیت: {format_withdrawal_status_fa(withdrawal.status)}
+تاریخ ثبت: {format_datetime(withdrawal.created_at)}"""
+
+
 async def _show_services(callback: CallbackQuery, session: AsyncSession) -> None:
     services = await ServicesRepository(session).list_recent(10)
     if not services:
@@ -2310,7 +2515,7 @@ def _format_setting_prompt(key: str, current_value: str | int) -> str:
     definition = SETTING_DEFINITION_BY_KEY[key]
     if definition.value_type == "int":
         min_hint = f"حداقل مقدار مجاز: {definition.min_value}" if definition.min_value is not None else "عدد صحیح ارسال کنید."
-        if key == WALLET_MAX_TOPUP_AMOUNT:
+        if key in {WALLET_MAX_TOPUP_AMOUNT, WALLET_MAX_WITHDRAW_AMOUNT}:
             min_hint = "عدد 0 یعنی بدون محدودیت. مقدار منفی مجاز نیست."
         hint = f"لطفاً مقدار جدید را به صورت عدد صحیح ارسال کنید.\n{min_hint}"
     else:
@@ -2332,9 +2537,9 @@ def _format_setting_value(key: str, value: str | int | None) -> str:
     if key in {PAYMENT_CARD_NUMBER, PAYMENT_CARD_HOLDER, PAYMENT_DESCRIPTION}:
         text = str(value or "").strip()
         return escape(text) if text else "ثبت نشده"
-    if key in {REFERRAL_REWARD_AMOUNT, WALLET_MIN_TOPUP_AMOUNT}:
+    if key in {REFERRAL_REWARD_AMOUNT, WALLET_MIN_TOPUP_AMOUNT, WALLET_MIN_WITHDRAW_AMOUNT}:
         return f"{format_money(int(value or 0))} تومان"
-    if key == WALLET_MAX_TOPUP_AMOUNT:
+    if key in {WALLET_MAX_TOPUP_AMOUNT, WALLET_MAX_WITHDRAW_AMOUNT}:
         parsed = int(value or 0)
         return "بدون محدودیت" if parsed == 0 else f"{format_money(parsed)} تومان"
     if key == ORDER_EXPIRE_MINUTES:

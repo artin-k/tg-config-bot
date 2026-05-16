@@ -53,6 +53,9 @@ class WalletTransactionType(str, Enum):
     REFERRAL_REWARD = "referral_reward"
     ADMIN_ADJUSTMENT = "admin_adjustment"
     DISCOUNT = "discount"
+    WITHDRAWAL_REQUEST = "withdrawal_request"
+    WITHDRAWAL_PAID = "withdrawal_paid"
+    WITHDRAWAL_REJECTED_REFUND = "withdrawal_rejected_refund"
 
 
 class WalletTransactionStatus(str, Enum):
@@ -74,6 +77,19 @@ class AffiliateCommissionStatus(str, Enum):
     PAID = "paid"
     CANCELLED = "cancelled"
     REVERSED = "reversed"
+
+
+class WalletWithdrawalStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    PAID = "paid"
+    CANCELLED = "cancelled"
+
+
+class WalletWithdrawalDestinationType(str, Enum):
+    CARD = "card"
+    SHEBA = "sheba"
 
 
 class TimestampMixin:
@@ -126,6 +142,14 @@ class User(TimestampMixin, Base):
     payments: Mapped[list[Payment]] = relationship(back_populates="user")
     services: Mapped[list[VPNService]] = relationship(back_populates="user")
     wallet_transactions: Mapped[list[WalletTransaction]] = relationship(back_populates="user")
+    wallet_withdrawal_requests: Mapped[list[WalletWithdrawalRequest]] = relationship(
+        back_populates="user",
+        foreign_keys="WalletWithdrawalRequest.user_id",
+    )
+    processed_withdrawal_requests: Mapped[list[WalletWithdrawalRequest]] = relationship(
+        back_populates="processed_by_admin",
+        foreign_keys="WalletWithdrawalRequest.processed_by_admin_id",
+    )
     sold_config_inventory_items: Mapped[list[ConfigInventory]] = relationship(
         back_populates="sold_to_user",
         foreign_keys="ConfigInventory.sold_to_user_id",
@@ -256,11 +280,50 @@ class WalletTransaction(TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(Text)
     related_order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id", ondelete="SET NULL"), index=True)
     related_payment_id: Mapped[int | None] = mapped_column(ForeignKey("payments.id", ondelete="SET NULL"), index=True)
+    related_withdrawal_id: Mapped[int | None] = mapped_column(
+        ForeignKey("wallet_withdrawal_requests.id", ondelete="SET NULL"),
+        index=True,
+    )
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped[User] = relationship(back_populates="wallet_transactions")
     order: Mapped[Order | None] = relationship()
     payment: Mapped[Payment | None] = relationship(back_populates="wallet_transactions")
+    withdrawal_request: Mapped[WalletWithdrawalRequest | None] = relationship(back_populates="wallet_transactions")
+
+
+class WalletWithdrawalRequest(TimestampMixin, Base):
+    __tablename__ = "wallet_withdrawal_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=WalletWithdrawalStatus.PENDING.value,
+        server_default=WalletWithdrawalStatus.PENDING.value,
+        index=True,
+    )
+    destination_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    destination_number: Mapped[str] = mapped_column(String(64), nullable=False)
+    account_holder_name: Mapped[str | None] = mapped_column(String(255))
+    admin_note: Mapped[str | None] = mapped_column(Text)
+    user_note: Mapped[str | None] = mapped_column(Text)
+    processed_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    user: Mapped[User] = relationship(
+        back_populates="wallet_withdrawal_requests",
+        foreign_keys=[user_id],
+    )
+    processed_by_admin: Mapped[User | None] = relationship(
+        back_populates="processed_withdrawal_requests",
+        foreign_keys=[processed_by_admin_id],
+    )
+    wallet_transactions: Mapped[list[WalletTransaction]] = relationship(back_populates="withdrawal_request")
 
 
 class VPNService(TimestampMixin, Base):

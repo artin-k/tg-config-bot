@@ -2,7 +2,17 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.models import ConfigInventory, ConfigInventoryStatus, Payment, Plan, TestAccount, User, VPNService, WalletTransaction
+from app.models import (
+    ConfigInventory,
+    ConfigInventoryStatus,
+    Payment,
+    Plan,
+    TestAccount,
+    User,
+    VPNService,
+    WalletTransaction,
+    WalletWithdrawalRequest,
+)
 from app.services.settings_service import SETTING_DEFINITIONS
 
 
@@ -53,6 +63,11 @@ class AdminInventoryCallback(CallbackData, prefix="adm_inv"):
     item_id: int = 0
     page: int = 0
     status: str = "all"
+
+
+class AdminWithdrawalCallback(CallbackData, prefix="adm_wd"):
+    action: str
+    withdrawal_id: int = 0
 
 
 def admin_main_keyboard() -> InlineKeyboardMarkup:
@@ -191,6 +206,7 @@ def admin_payments_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="💳 پرداخت‌های در انتظار تایید", callback_data=AdminActionCallback(action="payments"))
     builder.button(text="🏦 شارژهای کیف پول", callback_data=AdminActionCallback(action="wallet_topups"))
+    builder.button(text="💸 درخواست‌های برداشت", callback_data=AdminActionCallback(action="wallet_withdrawals"))
     builder.button(text="📜 تراکنش‌های کیف پول", callback_data=AdminActionCallback(action="wallet_transactions"))
     builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="panel"))
     builder.adjust(1)
@@ -389,6 +405,45 @@ def wallet_topups_keyboard(transactions: list[WalletTransaction]) -> InlineKeybo
         )
     builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="panel"))
     builder.adjust(*([2] * len(transactions)), 1)
+    return builder.as_markup()
+
+
+def wallet_withdrawals_keyboard(withdrawals: list[WalletWithdrawalRequest]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for withdrawal in withdrawals:
+        builder.button(
+            text=f"🔍 جزئیات برداشت {withdrawal.id}",
+            callback_data=AdminWithdrawalCallback(action="detail", withdrawal_id=withdrawal.id),
+        )
+        if withdrawal.status == "pending":
+            builder.button(
+                text=f"✅ تایید و پرداخت شد {withdrawal.id}",
+                callback_data=AdminWithdrawalCallback(action="pay", withdrawal_id=withdrawal.id),
+            )
+            builder.button(
+                text=f"❌ رد درخواست {withdrawal.id}",
+                callback_data=AdminWithdrawalCallback(action="reject", withdrawal_id=withdrawal.id),
+            )
+    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="cat_payments"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def wallet_withdrawal_review_keyboard(withdrawal_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="✅ تایید و پرداخت شد",
+        callback_data=AdminWithdrawalCallback(action="pay", withdrawal_id=withdrawal_id),
+    )
+    builder.button(
+        text="❌ رد درخواست",
+        callback_data=AdminWithdrawalCallback(action="reject", withdrawal_id=withdrawal_id),
+    )
+    builder.button(
+        text="🔍 جزئیات",
+        callback_data=AdminWithdrawalCallback(action="detail", withdrawal_id=withdrawal_id),
+    )
+    builder.adjust(1)
     return builder.as_markup()
 
 

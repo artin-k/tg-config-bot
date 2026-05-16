@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from app.config import get_settings
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.repositories.settings import SettingsRepository
@@ -35,6 +36,10 @@ ORDER_EXPIRE_MINUTES = "ORDER_EXPIRE_MINUTES"
 REFERRAL_REWARD_AMOUNT = "REFERRAL_REWARD_AMOUNT"
 WALLET_MIN_TOPUP_AMOUNT = "WALLET_MIN_TOPUP_AMOUNT"
 WALLET_MAX_TOPUP_AMOUNT = "WALLET_MAX_TOPUP_AMOUNT"
+WALLET_MIN_WITHDRAW_AMOUNT = "WALLET_MIN_WITHDRAW_AMOUNT"
+WALLET_MAX_WITHDRAW_AMOUNT = "WALLET_MAX_WITHDRAW_AMOUNT"
+
+_env_settings = get_settings()
 
 
 SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
@@ -96,6 +101,22 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default=0,
         value_type="int",
         description="بیشترین مبلغ مجاز شارژ کیف پول؛ 0 یعنی بدون محدودیت",
+        min_value=0,
+    ),
+    SettingDefinition(
+        key=WALLET_MIN_WITHDRAW_AMOUNT,
+        label="حداقل مبلغ برداشت",
+        default=_env_settings.wallet_min_withdraw_amount,
+        value_type="int",
+        description="کمترین مبلغ مجاز برای برداشت از کیف پول",
+        min_value=0,
+    ),
+    SettingDefinition(
+        key=WALLET_MAX_WITHDRAW_AMOUNT,
+        label="حداکثر مبلغ برداشت",
+        default=_env_settings.wallet_max_withdraw_amount,
+        value_type="int",
+        description="بیشترین مبلغ مجاز برداشت از کیف پول؛ 0 یعنی بدون محدودیت",
         min_value=0,
     ),
 )
@@ -182,6 +203,12 @@ class AppSettingsService:
     async def get_wallet_max_topup_amount(self) -> int:
         return await self._get_int_setting(WALLET_MAX_TOPUP_AMOUNT)
 
+    async def get_wallet_min_withdraw_amount(self) -> int:
+        return await self._get_int_setting(WALLET_MIN_WITHDRAW_AMOUNT)
+
+    async def get_wallet_max_withdraw_amount(self) -> int:
+        return await self._get_int_setting(WALLET_MAX_WITHDRAW_AMOUNT)
+
     async def _get_int_setting(self, key: str) -> int:
         definition = self._get_definition(key)
         value = await self.get_setting(key, default=definition.default, cast_type=int)
@@ -212,6 +239,14 @@ class AppSettingsService:
             min_amount = await self.get_wallet_min_topup_amount()
             if value < min_amount:
                 raise SettingValidationError("حداکثر شارژ باید 0 یا بزرگ‌تر/برابر حداقل شارژ باشد.")
+        elif key == WALLET_MIN_WITHDRAW_AMOUNT:
+            max_amount = await self.get_wallet_max_withdraw_amount()
+            if max_amount > 0 and value > max_amount:
+                raise SettingValidationError("حداقل برداشت نمی‌تواند از حداکثر برداشت بیشتر باشد.")
+        elif key == WALLET_MAX_WITHDRAW_AMOUNT and value > 0:
+            min_amount = await self.get_wallet_min_withdraw_amount()
+            if value < min_amount:
+                raise SettingValidationError("حداکثر برداشت باید 0 یا بزرگ‌تر/برابر حداقل برداشت باشد.")
 
     def _cast_definition_value(self, definition: SettingDefinition, value: str) -> str | int:
         if definition.value_type == "int":

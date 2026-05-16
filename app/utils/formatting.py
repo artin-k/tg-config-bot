@@ -48,6 +48,9 @@ WALLET_TRANSACTION_TYPE_LABELS = {
     WalletTransactionType.REFERRAL_REWARD.value: "پاداش زیرمجموعه‌گیری",
     WalletTransactionType.ADMIN_ADJUSTMENT.value: "تنظیم دستی مدیریت",
     WalletTransactionType.DISCOUNT.value: "تخفیف",
+    WalletTransactionType.WITHDRAWAL_REQUEST.value: "درخواست برداشت",
+    WalletTransactionType.WITHDRAWAL_PAID.value: "برداشت پرداخت‌شده",
+    WalletTransactionType.WITHDRAWAL_REJECTED_REFUND.value: "بازگشت برداشت ردشده",
 }
 
 WALLET_TRANSACTION_STATUS_LABELS = {
