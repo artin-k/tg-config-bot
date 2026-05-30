@@ -113,18 +113,20 @@ async def callback_mandatory_join_check(
                 reply_markup=markup,
             )
         except Exception as e:
-            logger.warning(
-                "failed_to_edit_mandatory_channels_message",
-                error=str(e),
-            )
-            await query.answer("❌ خطا در بروزرسانی", show_alert=True)
+            # If the user clicks refresh but still hasn't joined, Telegram raises "message is not modified"
+            if "message is not modified" in str(e).lower():
+                await query.answer(
+                    "⚠️ هنوز عضو کانال نشده‌اید. ابتدا عضو شوید و سپس دکمه بررسی را بزنید.", 
+                    show_alert=True
+                )
+            else:
+                logger.warning(
+                    "failed_to_edit_mandatory_channels_message",
+                    error=str(e),
+                )
+                await query.answer("❌ خطا در بروزرسانی", show_alert=True)
         else:
             await query.answer("✅ بررسی شد", show_alert=False)
-    else:
-        # User has joined all mandatory channels!
-        await query.message.delete()
-        await query.answer("✅ شما در تمام کانال‌های اجباری عضو هستید!", show_alert=True)
-
 
 async def _show_mandatory_channels_dashboard(
     update: Message | CallbackQuery,
