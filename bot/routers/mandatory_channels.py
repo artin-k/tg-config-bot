@@ -115,8 +115,9 @@ async def callback_mandatory_join_check(
 
 
 @router.message(Command("admin_channels"))
+@router.callback_query(F.data == "open_channels_menu")
 async def cmd_admin_channels(
-    message: Message,
+    update: Message | CallbackQuery,
     session: AsyncSession,
     settings: Settings,
 ) -> None:
@@ -124,10 +125,13 @@ async def cmd_admin_channels(
 
     # Check admin access
     if not is_admin_identity(
-        telegram_id=message.from_user.id,
+        telegram_id=update.from_user.id,
         settings=settings,
     ):
-        await message.answer("❌ شما دسترسی ادمین ندارید")
+        if isinstance(update, CallbackQuery):
+            await update.answer("❌ شما دسترسی ادمین ندارید", show_alert=True)
+        else:
+            await update.answer("❌ شما دسترسی ادمین ندارید")
         return
 
     repo = MandatoryChannelsRepository(session)
@@ -164,7 +168,12 @@ async def cmd_admin_channels(
 
     text += "برای حذف کانال روی دکمه آن کلیک کنید."
 
-    await message.answer(text, reply_markup=markup)
+    # Handle the response depending on if it was a button click or a typed command
+    if isinstance(update, CallbackQuery):
+        await update.message.edit_text(text, reply_markup=markup)
+        await update.answer()
+    else:
+        await update.answer(text, reply_markup=markup)
 
 
 @router.callback_query(F.data == "add_new_channel")
