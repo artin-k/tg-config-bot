@@ -41,11 +41,18 @@ def create_dispatcher(settings: Settings) -> Dispatcher:
     db_middleware = DbSessionMiddleware(async_session_maker)
     dp.update.middleware(db_middleware)
 
-    # Register mandatory channels middleware (checks after db middleware)
+    # Register mandatory channels middleware
     mandatory_join_middleware = DynamicMandatoryJoinMiddleware()
     dp.update.middleware(mandatory_join_middleware)
 
     dp.include_router(errors.router)
+    
+    # 🔴 MOVE ADMIN ROUTERS TO THE TOP 🔴
+    # This prevents generic menu handlers from eating admin commands
+    dp.include_router(admin.router)
+    dp.include_router(mandatory_channels.router)
+    
+    # The rest of your routers stay below
     dp.include_router(referral.router)
     dp.include_router(menu.router)
     dp.include_router(verification.router)
@@ -57,9 +64,8 @@ def create_dispatcher(settings: Settings) -> Dispatcher:
     dp.include_router(tutorials.router)
     dp.include_router(wallet.router)
     dp.include_router(support.router)
-    dp.include_router(mandatory_channels.router)
-    dp.include_router(admin.router)
     dp.include_router(common.router)
+    
     return dp
 
 
