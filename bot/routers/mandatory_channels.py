@@ -179,7 +179,7 @@ async def _show_mandatory_channels_dashboard(
         await update.answer(text, reply_markup=markup)
 
 
-@router.message(Command("admin_channels"))
+@router.message(Command("admin_channels"), StateFilter("*"))
 async def cmd_admin_channels(
     update: Message | CallbackQuery,
     session: AsyncSession,
@@ -187,8 +187,10 @@ async def cmd_admin_channels(
 ) -> None:
     """Display list of all mandatory channels with delete/add buttons.
     
+    Works from ANY FSM state, allowing admins to access this menu at any time.
+    
     Can be called from:
-    - @router.message for /admin_channels text command
+    - @router.message for /admin_channels text command (from any state)
     - admin.py's admin_action handler with callback data
     """
     await _show_mandatory_channels_dashboard(update, session, settings)
