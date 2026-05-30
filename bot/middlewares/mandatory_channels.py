@@ -2,12 +2,25 @@ from __future__ import annotations
 
 import structlog
 from aiogram import BaseMiddleware, Bot
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, TelegramObject, User as TelegramUser
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, TelegramObject, User as TelegramUser, Update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.repositories.mandatory_channels import MandatoryChannelsRepository
+from app.repositories.users import UsersRepository # Added to check admin status
 
 logger = structlog.get_logger(__name__)
+
+
+async def _is_admin(telegram_id: int | None, session: AsyncSession, settings) -> bool:
+    """Check if the user is an admin to bypass mandatory join checks."""
+    if telegram_id is None:
+        return False
+    if settings and settings.root_admin_telegram_id is not None and telegram_id == settings.root_admin_telegram_id:
+        return True
+    if settings and telegram_id in settings.admin_ids:
+        return True
+    user = await UsersRepository(session).get_by_telegram_id(telegram_id)
+    return bool(user and user.is_admin)
 
 
 class DynamicMandatoryJoinMiddleware(BaseMiddleware):
@@ -19,25 +32,40 @@ class DynamicMandatoryJoinMiddleware(BaseMiddleware):
     """
 
     async def __call__(self, handler, event: TelegramObject, data: dict):
-        # Only check for messages
-        if not isinstance(event, Message):
+        # Resolve the actual Message object from the incoming event/update
+        message: Message | None = None
+        
+        if isinstance(event, Message):
+            message = event
+        elif isinstance(event, Update) and event.message:
+            message = event.message
+
+        # If it's not a message (e.g., a callback query or inline query), let it pass
+        if not message:
             return await handler(event, data)
 
         # Skip service messages and non-text messages
-        if not event.text or event.message_auto_delete_timer_changed or event.group_chat_created:
+        if not message.text or message.message_auto_delete_timer_changed or message.group_chat_created:
             return await handler(event, data)
 
-        # Extract user and session from data
-        user: TelegramUser | None = event.from_user
+        # Extract user, session, and configurations from data
+        user: TelegramUser | None = message.from_user
         session: AsyncSession | None = data.get("session")
         bot: Bot | None = data.get("bot")
+        settings = data.get("settings")
 
         if not user or not session or not bot:
             return await handler(event, data)
 
         # Only check in private chats
-        if event.chat.type != "private":
+        if message.chat.type != "private":
             return await handler(event, data)
+
+        # --- ADMIN BYPASS ---
+        # Do not block admins from using the bot or configuration commands
+        if await _is_admin(user.id, session, settings):
+            return await handler(event, data)
+        # ---------------------
 
         try:
             # Check mandatory channels
@@ -71,7 +99,7 @@ class DynamicMandatoryJoinMiddleware(BaseMiddleware):
 
             if unjoined_channels:
                 # User is missing at least one channel
-                await self._send_mandatory_channels_message(event, bot, unjoined_channels)
+                await self._send_mandatory_channels_message(message, bot, unjoined_channels)
                 return  # Block the handler chain
 
         except Exception as e:
@@ -80,7 +108,7 @@ class DynamicMandatoryJoinMiddleware(BaseMiddleware):
             logger.error(
                 "mandatory_channels_middleware_error",
                 user_id=user.id,
-                chat_id=event.chat.id,
+                chat_id=message.chat.id,
                 error=str(e),
             )
             # Continue to handler regardless - fail open, not fail closed
@@ -127,4 +155,3 @@ class DynamicMandatoryJoinMiddleware(BaseMiddleware):
                 chat_id=event.chat.id,
                 error=str(e),
             )
-
