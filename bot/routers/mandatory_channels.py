@@ -115,7 +115,7 @@ async def callback_mandatory_join_check(
 
 
 @router.message(Command("admin_channels"))
-@router.callback_query(F.data == "open_channels_menu")
+@router.callback_query(F.data == "admin_channels_raw_btn")
 async def cmd_admin_channels(
     update: Message | CallbackQuery,
     session: AsyncSession,
