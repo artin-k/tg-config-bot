@@ -168,10 +168,6 @@ from bot.states.admin import (
 )
 
 router = Router(name="admin")
-
-from bot.routers.mandatory_channels import router as mandatory_channels_router
-router.include_router(mandatory_channels_router)
-
 logger = structlog.get_logger(__name__)
 
 EDIT_FIELD_MAP = {
