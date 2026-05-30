@@ -309,9 +309,44 @@ async def admin_action(
         await _show_dice(callback, session, settings)
         return
 
-    if action in {"tutorials_admin", "support_admin"}:
+    if action == "support_admin":
         await state.clear()
-        await _safe_edit_or_answer(callback, "این بخش فعلاً از منوی کاربر قابل مدیریت است.", reply_markup=admin_communications_keyboard())
+        # Fetch the current support username from the database
+        support_username = await AppSettingsService(session).get_support_username()
+        support_text = f"@{escape(support_username)}" if support_username else "ثبت نشده"
+        
+        # Build an inline menu with an Edit button linked to settings
+        builder = InlineKeyboardBuilder()
+        builder.button(
+            text="✏️ ویرایش آیدی پشتیبانی", 
+            callback_data=AdminSettingCallback(action="edit", key=SUPPORT_USERNAME)
+        )
+        builder.button(
+            text="↩️ بازگشت", 
+            callback_data=AdminActionCallback(action="cat_comms")
+        )
+        builder.adjust(1)
+        
+        await _safe_edit_or_answer(
+            callback,
+            f"☎️ مدیریت پشتیبانی\n\nآیدی پشتیبانی فعلی ربات: {support_text}\n\nبرای تغییر آیدی پشتیبانی روی دکمه زیر کلیک کنید:",
+            reply_markup=builder.as_markup()
+        )
+        return
+
+    if action == "tutorials_admin":
+        await state.clear()
+        builder = InlineKeyboardBuilder()
+        builder.button(
+            text="↩️ بازگشت", 
+            callback_data=AdminActionCallback(action="cat_comms")
+        )
+        builder.adjust(1)
+        await _safe_edit_or_answer(
+            callback,
+            "📚 مدیریت آموزش‌ها\n\nدر نسخه فعلی، آموزش‌ها به صورت استاتیک در فایل‌های کیبورد ربات (`bot/keyboards/tutorials.py`) تعریف شده‌اند و برای تغییر محتوای آن‌ها باید کدهای این بخش را ویرایش کنید.",
+            reply_markup=builder.as_markup()
+        )
         return
 
     if action == "settings":

@@ -79,6 +79,7 @@ async def callback_mandatory_join_check(
     query: CallbackQuery,
     bot,
     session: AsyncSession,
+    settings: Settings, # 1. Added settings parameter so we can show the menu
 ) -> None:
     """Refresh check for mandatory channel membership."""
 
@@ -129,14 +130,22 @@ async def callback_mandatory_join_check(
             await query.answer("✅ بررسی شد", show_alert=False)
             
     else:
-        # --- FIXED: ADDED THE MISSING ELSE BLOCK ---
         # User has joined all mandatory channels!
         try:
             await query.message.delete()
         except Exception as e:
             logger.warning("failed_to_delete_mandatory_channels_message", error=str(e))
             
-        await query.answer("✅ شما در تمام کانال‌های اجباری عضو هستید!", show_alert=True)
+        await query.answer("✅ عضویت شما تایید شد. خوش آمدید!", show_alert=True)
+
+        # 2. Automatically trigger the main menu to start the bot
+        from bot.menu_actions import show_main_menu
+        await show_main_menu(
+            message=query.message,
+            session=session,
+            settings=settings,
+            telegram_user=query.from_user,
+        )
 
 
 async def _show_mandatory_channels_dashboard(
@@ -415,3 +424,5 @@ async def cmd_cancel_channel_creation(
 
     await state.clear()
     await message.answer("❌ عملیات لغو شد.")
+
+ 
