@@ -395,9 +395,7 @@ async def pay_from_wallet(
         await _safe_edit_or_answer(callback, "این سفارش پیدا نشد.")
         return
 
-    if not user.is_phone_verified:
-        await _safe_edit_or_answer(callback, "برای پرداخت از کیف پول، ابتدا از بخش کیف پول شماره موبایل خود را تایید کنید.")
-        return
+    # --- NOTE: Removed the phone verification check here ---
 
     try:
         result = await PaymentService(session, VPNPanelService(), settings).pay_order_from_wallet(order.id, user.id)
