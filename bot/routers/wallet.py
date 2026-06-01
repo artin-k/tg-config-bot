@@ -34,11 +34,10 @@ from app.utils.withdrawals import (
 from bot import menu_actions, texts
 from bot.keyboards.admin import admin_main_keyboard
 from bot.keyboards.main_menu import main_menu_keyboard
-from bot.keyboards.verification import phone_verification_keyboard
 from bot.keyboards.wallet import WalletCallback, withdrawal_confirm_keyboard, withdrawal_destination_keyboard
 from bot.notifications import notify_admins_wallet_topup, notify_admins_wallet_withdrawal
 from bot.routers.menu import handle_main_menu_text
-from bot.states.wallet import VerificationStates, WalletStates
+from bot.states.wallet import WalletStates
 
 router = Router(name="wallet")
 
@@ -79,17 +78,7 @@ async def wallet_callback(
         await callback.message.answer("درخواست برداشت لغو شد.", reply_markup=main_menu_keyboard(is_admin=is_user_admin(user, settings)))
         return
 
-    if not user.is_phone_verified:
-        await state.clear()
-        await state.set_state(VerificationStates.waiting_contact)
-        await state.update_data(next_section="wallet")
-        await callback.message.answer(
-            """برای استفاده از این بخش، ابتدا باید شماره موبایل خود را تایید کنید.
-
-لطفاً با دکمه زیر شماره موبایل تلگرام خود را ارسال کنید 👇""",
-            reply_markup=phone_verification_keyboard(),
-        )
-        return
+    # --- NOTE: Removed phone verification check here ---
 
     if action == "topup":
         min_topup_amount = await AppSettingsService(session).get_wallet_min_topup_amount()
@@ -216,10 +205,8 @@ async def receive_topup_amount(
         await state.clear()
         await message.answer("ابتدا /start را ارسال کنید.", reply_markup=main_menu_keyboard())
         return
-    if not user.is_phone_verified:
-        await state.clear()
-        await menu_actions.show_wallet(message, session, state, settings)
-        return
+
+    # --- NOTE: Removed phone verification check here ---
 
     payment, transaction = await WalletService(session).create_topup_request(user_id=user.id, amount=amount)
     card_number = await app_settings.get_payment_card_number()
@@ -309,10 +296,8 @@ async def receive_withdraw_amount(
         await state.clear()
         await message.answer("ابتدا /start را ارسال کنید.", reply_markup=main_menu_keyboard())
         return
-    if not user.is_phone_verified:
-        await state.clear()
-        await menu_actions.show_wallet(message, session, state, settings)
-        return
+
+    # --- NOTE: Removed phone verification check here ---
 
     amount = _parse_positive_int(message.text)
     if amount is None:
