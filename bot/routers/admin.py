@@ -9,7 +9,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, User as TelegramUser, InlineKeyboardButton
-from sqlalchemy import func, select, delete # Added delete
+from sqlalchemy import func, select, delete # Imported delete
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import Settings
@@ -851,7 +851,7 @@ async def admin_payment_action(
             )
             if result.waiting_inventory:
                 await callback.answer("❌ موجودی کانفیگ برای این تعرفه تمام شده است. ابتدا موجودی را شارژ کنید.", show_alert=True)
-                if result.order_kind == OrderKind.PURCHASE.value and result.plan_id:
+                if result.order_kind == OrderKind.PURCHASE.value & result.plan_id:
                     await notify_admins_low_or_empty_inventory(callback.bot, session, result.plan_id)
             else:
                 await callback.answer("پرداخت تایید شد.")
@@ -1034,17 +1034,34 @@ async def admin_plan_action(
 
     if action == "delete_confirm":
         # Cascade delete associated services and orders to prevent foreign key violations
-        # 1. Delete associated services
-        await session.execute(delete(VPNService).where(VPNService.plan_id == plan.id))
+        # We need to wipe payments, commissions, inventory configs, orders, and services linked to this plan.
+        order_ids_subquery = select(Order.id).where(Order.plan_id == plan.id)
         
-        # 2. Delete associated orders
-        await session.execute(delete(Order).where(Order.plan_id == plan.id))
-        
-        # 3. Delete the plan itself
-        await plans_repo.delete(plan.id)
-        await session.commit()
-        
-        await _show_plans(callback, session, prefix="✅ تعرفه و تمام سرویس‌ها/سفارش‌های زیرمجموعه آن با موفقیت حذف شدند.\n\n")
+        try:
+            # 1. Delete associated payments
+            await session.execute(delete(Payment).where(Payment.order_id.in_(order_ids_subquery)))
+            
+            # 2. Delete associated commissions
+            await session.execute(delete(AffiliateCommission).where(AffiliateCommission.order_id.in_(order_ids_subquery)))
+            
+            # 3. Delete associated inventory configs
+            await session.execute(delete(ConfigInventory).where(ConfigInventory.plan_id == plan.id))
+            
+            # 4. Delete associated orders
+            await session.execute(delete(Order).where(Order.plan_id == plan.id))
+            
+            # 5. Delete associated services
+            await session.execute(delete(VPNService).where(VPNService.plan_id == plan.id))
+            
+            # 6. Delete the plan itself
+            await plans_repo.delete(plan.id)
+            await session.commit()
+            
+            await _show_plans(callback, session, prefix="✅ تعرفه و تمام سفارش‌ها، سرویس‌ها، پرداخت‌ها و موجودی‌های مرتبط با آن با موفقیت حذف شدند.\n\n")
+        except Exception as e:
+            await session.rollback()
+            logger.error("failed_cascade_delete_plan", plan_id=plan.id, error=str(e))
+            await callback.message.answer(f"❌ خطا در حذف کامل تعرفه: {e}")
         return
 
 
@@ -2406,7 +2423,7 @@ async def _show_plans(callback: CallbackQuery, session: AsyncSession, prefix: st
         lines = [
             f"{prefix}📦 مدیریت تعرفه‌ها",
             "",
-            "از این بخش می‌توانید تعرفه‌ها را اضافه، ویرایش، فعال/غیرفعال یا حذف کنید.",
+            "از این بخش می‌توانید تعرفه‌ها را اضافه, ویرایش، فعال/غیرفعال یا حذف کنید.",
             "برای ویرایش کامل، روی دکمه «⚙️ مدیریت» هر تعرفه بزنید.",
             "",
             "📋 لیست تعرفه‌ها:",
@@ -2634,6 +2651,8 @@ async def _show_recent_orders(callback: CallbackQuery, session: AsyncSession, pa
 
 
 async def _show_order_detail_panel(callback: CallbackQuery, order: Order) -> None:
+    # --- FIXED: Added dynamic local import to resolve NameError ---
+    from bot.menu_actions import format_order_detail
     detail_text = format_order_detail(order)
     
     builder = InlineKeyboardBuilder()
@@ -3013,3 +3032,5 @@ async def _remove_admin_buttons(callback: CallbackQuery) -> None:
             await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
+
+
