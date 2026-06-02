@@ -8,10 +8,8 @@ import structlog
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message, User as TelegramUser
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import CallbackQuery, Message, User as TelegramUser, InlineKeyboardButton
+from sqlalchemy import func, select, delete # Added delete
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import Settings
@@ -170,6 +168,14 @@ from bot.states.admin import (
 router = Router(name="admin")
 logger = structlog.get_logger(__name__)
 
+from aiogram.filters.callback_data import CallbackData
+
+# Callback used for interactive order management
+class AdminOrderCallback(CallbackData, prefix="adm_ord"):
+    action: str
+    order_id: int = 0
+    page: int = 0
+
 EDIT_FIELD_MAP = {
     "edit_title": ("title", "عنوان جدید تعرفه را ارسال کنید:", "title"),
     "edit_desc": ("description", "توضیحات جدید را ارسال کنید. برای خالی کردن، - بفرستید:", "description"),
@@ -178,6 +184,101 @@ EDIT_FIELD_MAP = {
     "edit_price": ("price", "قیمت جدید را به تومان ارسال کنید:", "positive_int"),
     "edit_sort": ("sort_order", "ترتیب نمایش جدید را ارسال کنید. مقدار 0 مجاز است:", "int"),
 }
+
+@router.callback_query(AdminOrderCallback.filter())
+async def admin_order_callback(
+    callback: CallbackQuery,
+    callback_data: AdminOrderCallback,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    if not await _is_admin(callback.from_user.id if callback.from_user else None, session, settings):
+        await callback.answer("⛔ شما دسترسی مدیریت ندارید.", show_alert=True)
+        return
+
+    await callback.answer()
+    action = callback_data.action
+    order_id = callback_data.order_id
+
+    if action == "list":
+        await _show_recent_orders(callback, session, page=callback_data.page)
+        return
+
+    order = await OrdersRepository(session).get_with_details(order_id)
+    if order is None:
+        await callback.message.answer("سفارش پیدا نشد.")
+        return
+
+    if action == "detail":
+        await _show_order_detail_panel(callback, order)
+        return
+
+    payment_service = PaymentService(session, VPNPanelService(), settings)
+
+    if action == "complete":
+        if order.status == OrderStatus.COMPLETED.value:
+            await callback.answer("این سفارش قبلاً تکمیل شده است.", show_alert=True)
+            return
+        if order.payment:
+            try:
+                result = await payment_service.approve_payment(order.payment.id)
+                # Notify the user on Telegram
+                await callback.bot.send_message(
+                    chat_id=result.user_telegram_id,
+                    text=_approved_message(result),
+                )
+                await callback.message.answer(f"✅ سفارش {order.tracking_code} با موفقیت تکمیل و کانفیگ صادر شد.")
+            except Exception as e:
+                await callback.message.answer(f"❌ خطا در تکمیل سفارش: {e}")
+        else:
+            order.status = OrderStatus.COMPLETED.value
+            await session.commit()
+            await callback.message.answer(f"✅ وضعیت سفارش {order.tracking_code} به تکمیل‌شده تغییر یافت.")
+        
+        # Refresh details panel
+        order = await OrdersRepository(session).get_with_details(order_id)
+        await _show_order_detail_panel(callback, order)
+        return
+
+    if action == "cancel":
+        if order.status in (OrderStatus.EXPIRED.value, OrderStatus.CANCELED.value):
+            await callback.answer("این سفارش قبلاً لغو شده است.", show_alert=True)
+            return
+        
+        order.status = OrderStatus.EXPIRED.value
+        # Free up the reserved inventory item
+        if order.config_inventory_id:
+            item = await session.get(ConfigInventory, order.config_inventory_id)
+            if item:
+                item.status = ConfigInventoryStatus.AVAILABLE.value
+                item.reserved_by_order_id = None
+            order.config_inventory_id = None
+        
+        await session.commit()
+        await callback.message.answer(f"✅ سفارش {order.tracking_code} با موفقیت لغو و موجودی آن آزاد شد.")
+        
+        # Refresh details panel
+        order = await OrdersRepository(session).get_with_details(order_id)
+        await _show_order_detail_panel(callback, order)
+        return
+
+    if action == "delete":
+        tracking_code = order.tracking_code
+        # Free up inventory if reserved
+        if order.config_inventory_id:
+            item = await session.get(ConfigInventory, order.config_inventory_id)
+            if item:
+                item.status = ConfigInventoryStatus.AVAILABLE.value
+                item.reserved_by_order_id = None
+        
+        if order.payment:
+            await session.delete(order.payment)
+        await session.delete(order)
+        await session.commit()
+        await callback.message.answer(f"✅ سفارش {tracking_code} به همراه اطلاعات پرداخت کاملاً حذف شد.")
+        await _show_recent_orders(callback, session)
+        return
 
 
 @router.message(Command("admin"))
@@ -918,7 +1019,7 @@ async def admin_plan_action(
     if action == "delete":
         usage_note = ""
         if await plans_repo.has_usage(plan.id):
-            usage_note = "\n\n⚠️ این تعرفه سفارش یا سرویس ثبت‌شده دارد؛ در صورت تایید، حذف کامل انجام نمی‌شود و فقط غیرفعال خواهد شد."
+            usage_note = "\n\n⚠️ این تعرفه سفارش یا سرویس ثبت‌شده دارد؛ در صورت تایید، حذف کامل انجام می‌شود و تمام سرویس‌ها و سفارش‌های زیرمجموعه آن نیز حذف خواهند شد."
         await _safe_edit_or_answer(
             callback,
             f"""⚠️ تایید حذف تعرفه
@@ -932,24 +1033,19 @@ async def admin_plan_action(
         return
 
     if action == "delete_confirm":
-        if await plans_repo.has_usage(plan.id):
-            await plans_repo.set_active(plan.id, False)
-            await session.commit()
-            refreshed = await plans_repo.get(plan.id)
-            available_count = await get_available_count(session, refreshed.id) if refreshed is not None else None
-            detail = _format_plan_detail(refreshed, available_count) if refreshed is not None else ""
-            await _safe_edit_or_answer(
-                callback,
-                f"این تعرفه سفارش یا سرویس ثبت‌شده دارد؛ حذف کامل ممکن نیست و به‌جای آن غیرفعال شد.\n\n{detail}",
-                reply_markup=plan_detail_keyboard(refreshed) if refreshed is not None else None,
-            )
-            return
+        # Cascade delete associated services and orders to prevent foreign key violations
+        # 1. Delete associated services
+        await session.execute(delete(VPNService).where(VPNService.plan_id == plan.id))
+        
+        # 2. Delete associated orders
+        await session.execute(delete(Order).where(Order.plan_id == plan.id))
+        
+        # 3. Delete the plan itself
         await plans_repo.delete(plan.id)
         await session.commit()
-        await _show_plans(callback, session, prefix="✅ تعرفه حذف شد.\n\n")
+        
+        await _show_plans(callback, session, prefix="✅ تعرفه و تمام سرویس‌ها/سفارش‌های زیرمجموعه آن با موفقیت حذف شدند.\n\n")
         return
-
-    await _safe_edit_or_answer(callback, "عملیات نامعتبر است.")
 
 
 @router.callback_query(AdminTestAccountCallback.filter())
@@ -2493,20 +2589,71 @@ async def _show_service_detail(callback: CallbackQuery, service) -> None:
     await _safe_edit_or_answer(callback, _format_service_detail(service), reply_markup=service_detail_keyboard(service))
 
 
-async def _show_recent_orders(callback: CallbackQuery, session: AsyncSession) -> None:
-    result = await session.scalars(
+async def _show_recent_orders(callback: CallbackQuery, session: AsyncSession, page: int = 0) -> None:
+    limit = 8
+    offset = page * limit
+    result = await session.execute(
         select(Order)
         .order_by(Order.created_at.desc())
-        .limit(10)
+        .limit(limit + 1)
+        .offset(offset)
     )
-    orders = list(result.all())
-    if not orders:
-        await _safe_edit_or_answer(callback, "هنوز سفارشی ثبت نشده است.")
+    orders = list(result.scalars().all())
+    has_next = len(orders) > limit
+    if has_next:
+        orders = orders[:limit]
+
+    if not orders and page == 0:
+        await _safe_edit_or_answer(callback, "هنوز سفارشی ثبت نشده است.", reply_markup=admin_sales_keyboard())
         return
-    lines = ["🧾 آخرین سفارش‌ها"]
+
+    builder = InlineKeyboardBuilder()
     for order in orders:
-        lines.append(f"{order.tracking_code} | {order_kind_label(order.order_kind)} | {format_money(order.amount)} تومان | {order.status}")
-    await _safe_edit_or_answer(callback, "\n".join(lines))
+        status_emoji = "🟢" if order.status == "completed" else "🔴" if order.status in ("expired", "canceled") else "🟡"
+        builder.button(
+            text=f"{status_emoji} {order.tracking_code} | {format_money(order.amount)}ت",
+            callback_data=AdminOrderCallback(action="detail", order_id=order.id),
+        )
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="⬅️ قبلی", callback_data=AdminOrderCallback(action="list", page=page - 1).pack()))
+    if has_next:
+        nav_buttons.append(InlineKeyboardButton(text="بعدی ➡️", callback_data=AdminOrderCallback(action="list", page=page + 1).pack()))
+    if nav_buttons:
+        builder.row(*nav_buttons)
+
+    builder.row(InlineKeyboardButton(text="↩️ بازگشت", callback_data=AdminActionCallback(action="cat_sales").pack()))
+    builder.adjust(1)
+
+    await _safe_edit_or_answer(
+        callback,
+        f"🧾 لیست سفارش‌ها و رزروها (صفحه {page + 1})\nبرای مدیریت هر سفارش روی آن کلیک کنید:",
+        reply_markup=builder.as_markup()
+    )
+
+
+async def _show_order_detail_panel(callback: CallbackQuery, order: Order) -> None:
+    detail_text = format_order_detail(order)
+    
+    builder = InlineKeyboardBuilder()
+    if order.status == OrderStatus.PENDING_PAYMENT.value:
+        builder.button(text="✅ تکمیل دستی (Done)", callback_data=AdminOrderCallback(action="complete", order_id=order.id))
+        builder.button(text="🔴 لغو رزرو / منقضی", callback_data=AdminOrderCallback(action="cancel", order_id=order.id))
+    elif order.status == OrderStatus.COMPLETED.value:
+        builder.button(text="🔴 لغو سفارش / منقضی", callback_data=AdminOrderCallback(action="cancel", order_id=order.id))
+    else:
+        builder.button(text="✅ فعال‌سازی و تکمیل دستی", callback_data=AdminOrderCallback(action="complete", order_id=order.id))
+        
+    builder.button(text="🗑 حذف کامل سفارش", callback_data=AdminOrderCallback(action="delete", order_id=order.id))
+    builder.button(text="↩️ بازگشت به لیست", callback_data=AdminOrderCallback(action="list"))
+    builder.adjust(1)
+    
+    await _safe_edit_or_answer(
+        callback,
+        detail_text,
+        reply_markup=builder.as_markup()
+    )
 
 
 async def _show_dice(callback: CallbackQuery, session: AsyncSession, settings: Settings) -> None:
