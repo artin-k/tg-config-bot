@@ -78,7 +78,17 @@ async def wallet_callback(
         await callback.message.answer("درخواست برداشت لغو شد.", reply_markup=main_menu_keyboard(is_admin=is_user_admin(user, settings)))
         return
 
-    # --- NOTE: Removed phone verification check here ---
+    if action in {"topup", "withdraw"}:
+        if not user.is_phone_verified:
+            from bot.keyboards.verification import phone_verification_keyboard
+            from bot.states.wallet import VerificationStates
+            await state.set_state(VerificationStates.waiting_contact)
+            await state.update_data(next_section="wallet")
+            await callback.message.answer(
+                "⚠️ برای شارژ یا برداشت از کیف پول، ابتدا باید شماره موبایل خود را تایید کنید.\n\nلطفاً دکمه زیر را بزنید تا شماره تماس شما ارسال شود 👇",
+                reply_markup=phone_verification_keyboard(),
+            )
+            return
 
     if action == "topup":
         min_topup_amount = await AppSettingsService(session).get_wallet_min_topup_amount()
@@ -206,30 +216,45 @@ async def receive_topup_amount(
         await message.answer("ابتدا /start را ارسال کنید.", reply_markup=main_menu_keyboard())
         return
 
-    # --- NOTE: Removed phone verification check here ---
+    # Create wallet topup request (Payment and WalletTransaction)
+    try:
+        payment, transaction = await WalletService(session).create_topup_request(
+            user_id=user.id,
+            amount=amount,
+        )
+    except Exception as e:
+        await state.clear()
+        await message.answer("❌ خطا در پردازش درخواست شارژ. لطفاً دوباره تلاش کنید.")
+        return
 
-    payment, transaction = await WalletService(session).create_topup_request(user_id=user.id, amount=amount)
+    # Fetch admin card details
     card_number = await app_settings.get_payment_card_number()
     card_holder = await app_settings.get_payment_card_holder()
-    payment_description = await app_settings.get_payment_description()
-    description_text = f"\nتوضیحات پرداخت:\n{escape(payment_description)}\n" if payment_description else ""
+    
+    if not card_number or not card_holder:
+        await state.clear()
+        await message.answer("❌ اطلاعات کارت بانکی ادمین ثبت نشده است. لطفاً بعداً دوباره تلاش کنید.")
+        return
+
+    # Transition to waiting for receipt (NOT clearing state)
     await state.set_state(WalletStates.waiting_topup_receipt)
-    await state.update_data(payment_id=payment.id, transaction_id=transaction.id)
-    await message.answer(
-        f"""💳 شارژ کیف پول
+    await state.update_data(transaction_id=transaction.id, topup_amount=amount)
 
-مبلغ قابل پرداخت:
-{format_money(amount)} تومان
+    # Send card details to user
+    card_info_message = f"""📋 اطلاعات کارت برای انتقال وجه:
 
-شماره کارت:
-{escape(card_number) or "ثبت نشده"}
+💳 شماره کارت: <code>{card_number}</code>
+👤 نام صاحب کارت: {escape(card_holder)}
+💰 مبلغ: {format_money(amount)} تومان
 
-به نام:
-{escape(card_holder) or "ثبت نشده"}
-{description_text}
+⚠️ لطفاً به دقت:<br/>
+۱. مبلغ دقیق {format_money(amount)} تومان را به این کارت منتقل کنید
+۲. از درگاه اپلیکیشن بانکی خود اسکرین‌شات یا عکس رسید انتقال را گرفته و ارسال کنید
+۳. صبر کنید تا مدیریت رسید را تایید کند
 
-بعد از پرداخت، تصویر رسید را همینجا ارسال کنید."""
-    )
+لطفاً تصویر رسید (screenshot یا عکس) را ارسال کنید:"""
+
+    await message.answer(card_info_message, parse_mode="HTML")
 
 
 @router.message(WalletStates.waiting_topup_receipt, F.photo)

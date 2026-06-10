@@ -6,9 +6,12 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 # ArtinVps2026
 
 class Settings(BaseSettings):
+    controld_api_token: str = Field(default="", alias="CONTROLD_API_TOKEN")
+    controld_profile_id: str = Field(default="", alias="CONTROLD_PROFILE_ID")
+
     bot_token: str = Field(default="", alias="BOT_TOKEN")
     database_url: str = Field(
-        default="postgresql+asyncpg://postgres:postgres@localhost:5432/telegram_vpn_shop",
+        default="postgresql+asyncpg://postgres:postgres@localhost:5432/dns_bot",
         alias="DATABASE_URL",
     )
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
@@ -44,6 +47,23 @@ class Settings(BaseSettings):
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         return init_settings, dotenv_settings, env_settings, file_secret_settings
+
+    @classmethod
+    def validate_bot_token(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("BOT_TOKEN environment variable must be set and non-empty")
+        # Validate Telegram bot token format (must contain ':' separator)
+        if ':' not in value:
+            raise ValueError("BOT_TOKEN format invalid: must be in format NUMERIC:ALPHANUMERIC")
+        return value.strip()
+
+    @classmethod
+    def validate_bot_token_format(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("BOT_TOKEN environment variable must be set and non-empty")
+        if ':' not in value:
+            raise ValueError("BOT_TOKEN format invalid: must be NUMERIC:ALPHANUMERIC (e.g., 123456789:ABCdefGHIjkl)")
+        return value.strip()
 
     @field_validator("redis_url", mode="after")
     @classmethod
@@ -164,4 +184,37 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    _validate_settings(settings)
+    return settings
+
+
+def _validate_settings(settings: Settings) -> None:
+    """Startup validation to catch configuration errors early with clear messages."""
+    errors: list[str] = []
+    
+    # 1. Validate DATABASE_URL
+    if not settings.database_url:
+        errors.append("❌ DATABASE_URL is not set or empty")
+    elif not settings.database_url.startswith(("postgresql://", "postgresql+asyncpg://")):
+        errors.append("❌ DATABASE_URL must be PostgreSQL (postgresql:// or postgresql+asyncpg://)")
+    
+    # 2. Validate FSM_STORAGE consistency
+    if settings.fsm_storage == "redis" and not settings.redis_url:
+        errors.append("❌ FSM_STORAGE=redis configured but REDIS_URL is empty")
+    
+    # 3. Warn if using memory storage (state will be lost on restart)
+    if settings.fsm_storage == "memory":
+        import warnings
+        warnings.warn(
+            "⚠️  FSM_STORAGE=memory: User conversation state will be lost on bot restart. "
+            "For production, set REDIS_URL and FSM_STORAGE=redis",
+            RuntimeWarning,
+            stacklevel=3
+        )
+    
+    # Raise error if critical validations failed
+    if errors:
+        error_msg = "Configuration validation failed:\n\n" + "\n".join(errors)
+        error_msg += "\n\nPlease set missing environment variables in .env or system environment."
+        raise ValueError(error_msg)

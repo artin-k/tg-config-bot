@@ -15,10 +15,8 @@ from app.repositories.plans import PlansRepository
 from app.repositories.services import ServicesRepository
 from app.repositories.test_accounts import TestAccountsRepository
 from app.repositories.users import UsersRepository
-from app.repositories.config_inventory import ConfigInventoryRepository
 from app.services.order_service import OrderService
 from app.services.affiliate_service import AffiliateService
-from app.services.inventory_service import release_expired_reservations
 from app.services.settings_service import AppSettingsService
 from app.utils.admin_access import is_user_admin
 from app.utils.codes import generate_discount_code
@@ -57,7 +55,7 @@ async def show_main_menu(
 
 async def show_buy_renew_menu(message: Message) -> None:
     await message.answer(
-        "🛒 خرید اشتراک\n\nبرای خرید سرویس جدید، گزینه خرید اشتراک را انتخاب کنید.\n\nتوجه: در نسخه فعلی تمدید مستقیم سرویس فعال نیست؛ برای ادامه استفاده، لطفاً سرویس جدید خریداری کنید.",
+        "🛒 خرید اشتراک DNS\n\nبرای خرید اشتراک جدید، گزینه خرید را انتخاب کنید.\n\nتوجه: در این نسخه تمدید مستقیم اشتراک با اضافه کردن زمان انجام می‌شود.",
         reply_markup=buy_renew_menu_keyboard(),
     )
 
@@ -68,6 +66,9 @@ async def show_features_menu(message: Message) -> None:
         reply_markup=features_menu_keyboard(),
     )
 
+
+# Open bot/menu_actions.py
+# Find and update your show_account_dashboard function:
 
 async def show_account_dashboard(
     message: Message,
@@ -84,38 +85,32 @@ async def show_account_dashboard(
     active_services_count = len(await ServicesRepository(session).list_active_by_user(user.id))
     recent_orders_count = await OrdersRepository(session).count_by_user(user.id)
 
-    # Note: Removed the phone number display and set phone_verified=True to prevent the verify button from showing up on the menu
+    # --- FIXED: Use the database verification status instead of hardcoded 'True' ---
     await message.answer(
         f"""👤 حساب کاربری شما
 
 🆔 آیدی عددی: {user.telegram_id}
 🏦 موجودی کیف پول: {format_money(user.wallet_balance)} تومان
 👥 دعوت مستقیم: {direct_referrals}
-🛍 سرویس‌های فعال: {active_services_count}
+🛍 دستگاه‌های فعال (DNS): {active_services_count}
 📦 سفارش‌های اخیر: {recent_orders_count}""",
-        reply_markup=account_dashboard_keyboard(phone_verified=True),
+        reply_markup=account_dashboard_keyboard(phone_verified=user.is_phone_verified),
     )
 
 
+# In bot/menu_actions.py
+
 async def show_buy_plans(message: Message, session: AsyncSession) -> None:
-    released = await release_expired_reservations(session)
-    if released:
-        await session.commit()
+    # 1. Fetch active DNS plans
     plans = await PlansRepository(session).list_active()
     if not plans:
         await message.answer("در حال حاضر پلن فعالی برای خرید وجود ندارد.", reply_markup=main_menu_keyboard())
         return
-    counts = await ConfigInventoryRepository(session).available_counts_for_plans([plan.id for plan in plans])
-    if all(counts.get(plan.id, 0) <= 0 for plan in plans):
-        await message.answer(
-            "در حال حاضر موجودی سرویس‌ها به پایان رسیده است.\nلطفاً بعداً مراجعه کنید یا با پشتیبانی در ارتباط باشید.",
-            reply_markup=main_menu_keyboard(),
-        )
-        return
-    unavailable_lines = [f"❌ {plan.title} | ناموجود" for plan in plans if counts.get(plan.id, 0) <= 0]
+
+    # 2. Bypass inventory checks since DNS has unlimited stock
+    counts = {plan.id: 9999 for plan in plans}
     text = texts.BUY_PLANS_TEXT
-    if unavailable_lines:
-        text += "\n\n" + "\n".join(unavailable_lines)
+    
     await message.answer(text, reply_markup=plans_keyboard(plans, counts))
 
 
@@ -125,7 +120,7 @@ async def show_renewal_services(message: Message, session: AsyncSession) -> None
 
 async def show_renewal_disabled(message: Message, session: AsyncSession | None = None) -> None:
     await message.answer(
-        "♻️ تمدید مستقیم سرویس در حال حاضر فعال نیست.\n\nبرای ادامه استفاده، لطفاً از بخش «خرید اشتراک» یک سرویس جدید تهیه کنید.",
+        "♻️ تمدید مستقیم اشتراک در حال حاضر فعال نیست.\n\nبرای ادامه استفاده، لطفاً از بخش «خرید اشتراک» یک سرویس جدید تهیه کنید.",
         reply_markup=buy_renew_menu_keyboard(),
     )
 
@@ -145,7 +140,7 @@ async def show_my_services(
         await message.answer("شما هنوز سرویس فعالی ندارید.", reply_markup=main_menu_keyboard())
         return
 
-    lines = ["🛍 سرویس‌های شما"]
+    lines = ["🛍 اشتراک‌های DNS فعال شما"]
     for index, service in enumerate(services, start=1):
         lines.append(format_service_summary(service, index))
 
@@ -158,12 +153,11 @@ async def show_tariffs(message: Message, session: AsyncSession) -> None:
         await message.answer("در حال حاضر تعرفه فعالی ثبت نشده است.", reply_markup=main_menu_keyboard())
         return
 
-    lines = ["💰 تعرفه اشتراک‌ها"]
+    lines = ["💰 تعرفه اشتراک‌های DNS"]
     for index, plan in enumerate(plans, start=1):
         lines.append(
             f"""
 {index}. {escape(plan.title)}
-📦 حجم: {plan.volume_gb} گیگ
 🗓 مدت اعتبار: {plan.duration_days} روز
 💵 قیمت: {format_money(plan.price)} تومان"""
         )
@@ -180,9 +174,6 @@ async def show_order_tracking(
     settings: Settings,
     telegram_user: TelegramUser | None = None,
 ) -> None:
-    released = await release_expired_reservations(session)
-    if released:
-        await session.commit()
     user = await _get_current_or_create_user(message, session, settings, telegram_user)
     if user is None:
         await message.answer("امکان شناسایی حساب تلگرام شما وجود ندارد. لطفاً دوباره تلاش کنید.", reply_markup=main_menu_keyboard())
@@ -238,9 +229,9 @@ async def show_referral(
     )
 
     await message.answer(
-        f"""👥 زیرمجموعه‌گیری
+        f"""👥 زیرمجموعه‌گیری و معرفین
 
-با دعوت دوستان خود می‌توانید پاداش دریافت کنید.
+با دعوت دوستان خود می‌توانید تخفیف و پاداش دریافت کنید.
 
 🔗 لینک دعوت اختصاصی شما:
 https://t.me/{bot_username}?start={user.referral_code}
@@ -259,7 +250,7 @@ async def show_tutorials(message: Message) -> None:
     await message.answer(
         """📚 بخش آموزش
 
-لطفاً سیستم‌عامل یا برنامه مورد نظر خود را انتخاب کنید:""",
+لطفاً سیستم‌عامل مورد نظر خود را برای اتصال به DNS انتخاب کنید:""",
         reply_markup=tutorials_keyboard(),
     )
 
@@ -288,7 +279,6 @@ async def show_wallet(
         await message.answer("امکان شناسایی حساب تلگرام شما وجود ندارد. لطفاً دوباره تلاش کنید.", reply_markup=main_menu_keyboard())
         return
 
-    # Note: Removed the phone verification check. All users can now directly access the wallet menu.
     await message.answer(
         f"""🏦 کیف پول شما
 
@@ -315,34 +305,34 @@ async def show_test_account(
     if existing_claim is not None:
         account = existing_claim.test_account
         await message.answer(
-            f"""شما قبلاً اکانت تست دریافت کرده‌اید.
+            f"""شما قبلاً دی‌ان‌اس تست دریافت کرده‌اید.
 
 🔑 {escape(account.title)}
 
-🔗 کانفیگ:
+🌐 دی‌ان‌اس DoH:
 {escape(account.config_link)}"""
-            + (f"\n\n🔗 لینک اشتراک:\n{escape(account.subscription_link)}" if account.subscription_link else ""),
+            + (f"\n\n🔒 دی‌ان‌اس DoT:\n{escape(account.subscription_link)}" if account.subscription_link else ""),
             reply_markup=main_menu_keyboard(),
         )
         return
 
     account = await repo.get_available()
     if account is None:
-        await message.answer("در حال حاضر اکانت تستی موجود نیست.", reply_markup=main_menu_keyboard())
+        await message.answer("در حال حاضر دی‌ان‌اس تستی موجود نیست.", reply_markup=main_menu_keyboard())
         return
 
     await repo.create_claim(user_id=user.id, test_account=account)
     await session.commit()
-    text = f"""🔑 اکانت تست شما آماده است
+    text = f"""🔑 دی‌ان‌اس تست شما آماده است
 
 {escape(account.title)}
 
 ⏳ مدت تست: {account.duration_hours} ساعت
 
-🔗 کانفیگ:
+🌐 دی‌ان‌اس DoH (HTTPS):
 {escape(account.config_link)}"""
     if account.subscription_link:
-        text += f"\n\n🔗 لینک اشتراک:\n{escape(account.subscription_link)}"
+        text += f"\n\n🔒 دی‌ان‌اس DoT (TLS):\n{escape(account.subscription_link)}"
     await message.answer(text, reply_markup=main_menu_keyboard())
 
 
@@ -428,11 +418,10 @@ def format_service_summary(service: VPNService, index: int | None = None) -> str
     prefix = f"\n{index}. " if index is not None else ""
     return f"""{prefix}{escape(service.username)}
 ⚡ پلن: {escape(service.plan.title if service.plan else "-")}
-📦 حجم: {service.volume_gb} گیگ
 🗓 تاریخ انقضا: {format_datetime(service.expire_at)}
 📌 وضعیت: {format_service_status_fa(service.status)}
-🔗 لینک اشتراک: {escape(service.subscription_link or "-")}
-🔗 لینک کانفیگ: {escape(service.config_link or "-")}"""
+🌐 دی‌ان‌اس DoH: `{escape(service.config_link or "-")}`
+🔒 دی‌ان‌اس DoT: `{escape(service.subscription_link or "-")}`"""
 
 
 def format_order_summary(order: Order, index: int | None = None) -> str:
@@ -465,7 +454,7 @@ def format_order_detail(order: Order) -> str:
         f"💵 مبلغ: {format_money(order.amount)} تومان",
         f"📌 وضعیت سفارش: {format_order_status_fa(order.status)}",
         f"📎 وضعیت رسید: {receipt_status}",
-        f"🔐 نام کاربری/سرویس: {escape(service_username)}",
+        f"🔐 نام دستگاه: {escape(service_username)}",
         f"🗓 تاریخ ثبت: {format_datetime(order.created_at)}",
     ]
     if order.status == OrderStatus.PENDING_PAYMENT.value:
@@ -489,12 +478,6 @@ async def _get_current_or_create_user(
     settings: Settings | None = None,
     telegram_user: TelegramUser | None = None,
 ) -> User | None:
-    """Return the real Telegram user for both normal messages and inline-callback messages.
-
-    In callback handlers, callback.message.from_user is the bot itself, not the user who
-    clicked the inline button. Passing callback.from_user prevents account/wallet/order
-    pages from looking up the bot account and incorrectly saying /start is required.
-    """
     actual_user = telegram_user or message.from_user
     if actual_user is None:
         return None

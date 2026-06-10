@@ -1,3 +1,4 @@
+# Open bot/routers/buy.py
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -9,22 +10,13 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.models import DiceRoll, OrderKind, OrderStatus
-from app.repositories.config_inventory import ConfigInventoryRepository
+from app.models import OrderKind, OrderStatus
 from app.repositories.dice_rolls import DiceRollsRepository
 from app.repositories.orders import OrdersRepository
-from app.repositories.payments import PaymentsRepository
 from app.repositories.plans import PlansRepository
 from app.repositories.services import ServicesRepository
 from app.repositories.users import UsersRepository
 from app.services.order_service import OrderService
-from app.services.inventory_service import (
-    InventoryUnavailableError,
-    get_available_count,
-    notify_admins_empty_inventory_attempt,
-    notify_admins_low_or_empty_inventory,
-    release_expired_reservations,
-)
 from app.services.payment_service import (
     InsufficientWalletBalanceError,
     PaymentAlreadyProcessedError,
@@ -55,34 +47,35 @@ from bot.keyboards.renewal import renewal_invoice_keyboard
 from bot.notifications import notify_admins_order_payment
 from bot.routers.menu import handle_main_menu_text
 from bot.states.buy import BuyStates
+from app.models import OrderKind, OrderStatus, DiceRoll
+from app.repositories.payments import PaymentsRepository
 
 router = Router(name="buy")
 
 
 @router.message(F.text == texts.BTN_BUY)
-async def show_plans(message: Message, session: AsyncSession) -> None:
-    released = await release_expired_reservations(session)
-    if released:
-        await session.commit()
+async def show_plans(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    if message.from_user:
+        user = await UsersRepository(session).get_by_telegram_id(message.from_user.id)
+        if user is None or not user.is_phone_verified:
+            from bot.keyboards.verification import phone_verification_keyboard
+            from bot.states.wallet import VerificationStates
+            await state.set_state(VerificationStates.waiting_contact)
+            await state.update_data(next_section="buy")
+            await message.answer(
+                "⚠️ برای خرید اشتراک DNS، ابتدا باید شماره موبایل خود را تایید کنید.\n\nلطفاً دکمه زیر را بزنید تا شماره تماس شما ارسال شود 👇",
+                reply_markup=phone_verification_keyboard(),
+            )
+            return
+
     plans = await PlansRepository(session).list_active()
     if not plans:
         await message.answer("در حال حاضر پلن فعالی برای خرید وجود ندارد.", reply_markup=main_menu_keyboard())
         return
 
-    counts = await ConfigInventoryRepository(session).available_counts_for_plans([plan.id for plan in plans])
-    unavailable_plans = [plan for plan in plans if counts.get(plan.id, 0) <= 0]
-    if len(unavailable_plans) == len(plans):
-        for plan in unavailable_plans:
-            await notify_admins_empty_inventory_attempt(message.bot, session, plan)
-        await message.answer(
-            "در حال حاضر موجودی سرویس‌ها به پایان رسیده است.\nلطفاً بعداً مراجعه کنید یا با پشتیبانی در ارتباط باشید.",
-            reply_markup=main_menu_keyboard(),
-        )
-        return
-    unavailable_lines = [f"❌ {plan.title} | ناموجود" for plan in unavailable_plans]
+    # DNS has unlimited stock; bypass inventory counts
+    counts = {plan.id: 9999 for plan in plans}
     text = texts.BUY_PLANS_TEXT
-    if unavailable_lines:
-        text += "\n\n" + "\n".join(unavailable_lines)
     await message.answer(text, reply_markup=plans_keyboard(plans, counts))
 
 
@@ -96,21 +89,9 @@ async def buy_back_to_menu(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == BUY_BACK_TO_PLANS)
 async def buy_back_to_plans(callback: CallbackQuery, session: AsyncSession) -> None:
     await callback.answer()
-    released = await release_expired_reservations(session)
-    if released:
-        await session.commit()
     plans = await PlansRepository(session).list_active()
-    counts = await ConfigInventoryRepository(session).available_counts_for_plans([plan.id for plan in plans])
-    unavailable_plans = [plan for plan in plans if counts.get(plan.id, 0) <= 0]
+    counts = {plan.id: 9999 for plan in plans}
     text = texts.BUY_PLANS_TEXT
-    if plans and len(unavailable_plans) == len(plans):
-        for plan in unavailable_plans:
-            await notify_admins_empty_inventory_attempt(callback.bot, session, plan)
-        text = "در حال حاضر موجودی سرویس‌ها به پایان رسیده است.\nلطفاً بعداً مراجعه کنید یا با پشتیبانی در ارتباط باشید."
-    else:
-        unavailable_lines = [f"❌ {plan.title} | ناموجود" for plan in unavailable_plans]
-        if unavailable_lines:
-            text += "\n\n" + "\n".join(unavailable_lines)
     if callback.message:
         await callback.message.edit_text(text, reply_markup=plans_keyboard(plans, counts))
 
@@ -126,14 +107,8 @@ async def show_pre_invoice(
     if plan is None or not plan.is_active:
         await _safe_edit_or_answer(callback, "این پلن در دسترس نیست.")
         return
-    if await get_available_count(session, plan.id) <= 0:
-        await notify_admins_empty_inventory_attempt(callback.bot, session, plan)
-        await _safe_edit_or_answer(
-            callback,
-            "❌ موجودی این تعرفه در حال حاضر به پایان رسیده است.\nلطفاً تعرفه دیگری انتخاب کنید یا با پشتیبانی در ارتباط باشید.",
-            reply_markup=main_menu_keyboard(),
-        )
-        return
+
+    # --- REMOVED: Old inventory stock checks ---
 
     user = None
     if callback.from_user:
@@ -217,14 +192,7 @@ async def receive_discount_code(
             await state.clear()
             await message.answer("این پلن در دسترس نیست.", reply_markup=main_menu_keyboard())
             return
-        if await get_available_count(session, plan.id) <= 0:
-            await state.clear()
-            await notify_admins_empty_inventory_attempt(message.bot, session, plan)
-            await message.answer(
-                "❌ موجودی این تعرفه در حال حاضر به پایان رسیده است.\nلطفاً تعرفه دیگری انتخاب کنید یا با پشتیبانی در ارتباط باشید.",
-                reply_markup=main_menu_keyboard(),
-            )
-            return
+        
         await state.clear()
         await message.answer(
             _format_purchase_invoice(plan, user.wallet_balance, discount),
@@ -248,9 +216,6 @@ async def receive_discount_code(
             reply_markup=renewal_invoice_keyboard(service.id, plan.id, discount.id),
         )
         return
-
-    await state.clear()
-    await message.answer("درخواست تخفیف قابل ادامه نیست. لطفاً دوباره تلاش کنید.", reply_markup=main_menu_keyboard())
 
 
 @router.message(BuyStates.waiting_username)
@@ -279,33 +244,18 @@ async def receive_username(
         await state.clear()
         await message.answer("سفارش قابل ادامه نیست. لطفاً دوباره تلاش کنید.", reply_markup=main_menu_keyboard())
         return
-    if await get_available_count(session, plan.id) <= 0:
-        await state.clear()
-        await notify_admins_empty_inventory_attempt(message.bot, session, plan)
-        await message.answer(
-            "❌ موجودی این سرویس در حال حاضر به پایان رسیده است.\n\nلطفاً یکی از سرویس‌های دیگر را انتخاب کنید یا با پشتیبانی در ارتباط باشید.",
-            reply_markup=main_menu_keyboard(),
-        )
-        return
 
+    # --- REMOVED: Unused exception and stock checking triggers ---
     order_service = OrderService(session, settings)
-    try:
-        order, payment = await order_service.create_order_with_payment(
-            user=user,
-            plan=plan,
-            custom_username=normalized_or_reason,
-            discount_code=data.get("discount_code"),
-            discount_percent=int(data.get("discount_percent") or 0),
-            discount_amount=int(data.get("discount_amount") or 0),
-        )
-    except InventoryUnavailableError:
-        await state.clear()
-        await notify_admins_empty_inventory_attempt(message.bot, session, plan)
-        await message.answer(
-            "❌ موجودی این سرویس در حال حاضر به پایان رسیده است.\n\nلطفاً یکی از سرویس‌های دیگر را انتخاب کنید یا با پشتیبانی در ارتباط باشید.",
-            reply_markup=main_menu_keyboard(),
-        )
-        return
+    order, payment = await order_service.create_order_with_payment(
+        user=user,
+        plan=plan,
+        custom_username=normalized_or_reason,
+        discount_code=data.get("discount_code"),
+        discount_percent=int(data.get("discount_percent") or 0),
+        discount_amount=int(data.get("discount_amount") or 0),
+    )
+    
     expire_minutes = await AppSettingsService(session).get_order_expire_minutes()
 
     await state.clear()
@@ -324,6 +274,8 @@ async def receive_username(
     )
 
 
+# Open bot/routers/buy.py
+
 @router.callback_query(PaymentCallback.filter())
 async def show_payment_info(
     callback: CallbackQuery,
@@ -332,9 +284,15 @@ async def show_payment_info(
     session: AsyncSession,
     settings: Settings,
 ) -> None:
+    # 1. Stop the inline keyboard loading spinner
     await callback.answer()
-    order = await OrdersRepository(session).get_with_details(callback_data.order_id)
-    if order is None or callback.from_user is None or order.user.telegram_id != callback.from_user.id:
+    
+    # 2. Fetch the user cleanly from the database to avoid relationship lookups
+    user = await UsersRepository(session).get_by_telegram_id(callback.from_user.id) if callback.from_user else None
+    
+    # 3. Retrieve the order object
+    order = await OrdersRepository(session).get(callback_data.order_id)
+    if order is None or user is None or order.user_id != user.id:
         await _safe_edit_or_answer(callback, "این سفارش پیدا نشد.")
         return
 
@@ -347,18 +305,27 @@ async def show_payment_info(
         await _safe_edit_or_answer(callback, "این سفارش قبلاً پردازش شده است.")
         return
 
-    payment = order.payment
+    # 4. Fetch the payment record directly to prevent async lazy-load crashes
+    from app.models import Payment
+    from sqlalchemy import select
+    
+    payment = await session.scalar(
+        select(Payment).where(Payment.order_id == order.id)
+    )
     if payment is None:
         await _safe_edit_or_answer(callback, "پرداخت این سفارش پیدا نشد.")
         return
 
+    # 5. Save state data and present the instructions to the user
     await state.set_state(BuyStates.waiting_receipt)
     await state.update_data(order_id=order.id, payment_id=payment.id)
+    
     app_settings = AppSettingsService(session)
     card_number = await app_settings.get_payment_card_number()
     card_holder = await app_settings.get_payment_card_holder()
     payment_description = await app_settings.get_payment_description()
     description_text = f"\nتوضیحات پرداخت:\n{escape(payment_description)}\n" if payment_description else ""
+    
     if callback.message:
         await callback.message.answer(
             f"""💳 پرداخت دستی
@@ -395,7 +362,9 @@ async def pay_from_wallet(
         await _safe_edit_or_answer(callback, "این سفارش پیدا نشد.")
         return
 
-    # --- NOTE: Removed the phone verification check here ---
+    if not user.is_phone_verified:
+        await callback.answer("⚠️ برای تکمیل خرید ابتدا شماره تماس خود را تایید کنید.", show_alert=True)
+        return
 
     try:
         result = await PaymentService(session, VPNPanelService(), settings).pay_order_from_wallet(order.id, user.id)
@@ -424,10 +393,6 @@ async def pay_from_wallet(
         _approved_wallet_message(result),
         reply_markup=main_menu_keyboard(),
     )
-    # Inventory belongs only to new purchases. Renewals extend the existing
-    # service/config and must not trigger low-stock or empty-stock alerts.
-    if result.order_kind == OrderKind.PURCHASE.value and result.plan_id:
-        await notify_admins_low_or_empty_inventory(callback.bot, session, result.plan_id)
 
 
 @router.message(BuyStates.waiting_receipt, F.photo)
@@ -493,12 +458,17 @@ def _format_purchase_invoice(plan, wallet_balance: int, discount: DiceRoll | Non
 🎁 تخفیف: {discount.discount_percent}٪ | {format_money(discount_amount)} تومان
 💵 مبلغ نهایی: {format_money(final_amount)} تومان"""
 
-    return f"""🧾 پیش‌فاکتور خرید اشتراک
+    # --- FIXED: Dynamically calculate days/hours from plan.duration_hours ---
+    hours = plan.duration_hours
+    duration_val = hours // 24 if hours >= 24 and hours % 24 == 0 else hours
+    duration_unit = "روز" if hours >= 24 and hours % 24 == 0 else "ساعت"
+    # ------------------------------------------------------------------------
 
-🔐 نام کاربری: در مرحله بعد وارد می‌شود
+    return f"""🧾 پیش‌فاکتور خرید اشتراک DNS
+
+🔐 نام دستگاه: در مرحله بعد وارد می‌شود
 ⚡ نام سرویس: {escape(plan.title)}
-📦 حجم: {plan.volume_gb} گیگ
-🗓 مدت اعتبار: {plan.duration_days} روز
+🗓 مدت اعتبار: {duration_val} {duration_unit}
 💵 قیمت: {format_money(plan.price)} تومان{discount_lines}
 🏦 موجودی کیف پول شما: {format_money(wallet_balance)} تومان
 
@@ -515,12 +485,17 @@ def _format_renewal_invoice(service, plan, discount: DiceRoll | None = None) -> 
 🎁 تخفیف: {discount.discount_percent}٪ | {format_money(discount_amount)} تومان
 💵 مبلغ نهایی: {format_money(final_amount)} تومان"""
 
-    return f"""♻️ پیش‌فاکتور تمدید سرویس
+    # --- FIXED: Dynamically calculate days/hours from plan.duration_hours ---
+    hours = plan.duration_hours
+    duration_val = hours // 24 if hours >= 24 and hours % 24 == 0 else hours
+    duration_unit = "روز" if hours >= 24 and hours % 24 == 0 else "ساعت"
+    # ------------------------------------------------------------------------
 
-👤 نام کاربری سرویس: {escape(service.username)}
+    return f"""♻️ پیش‌فاکتور تمدید اشتراک
+
+👤 نام دستگاه: {escape(service.username)}
 ⚡ پلن تمدید: {escape(plan.title)}
-📦 حجم افزوده: {plan.volume_gb} گیگ
-🗓 مدت افزوده: {plan.duration_days} روز
+🗓 مدت تمدید: {duration_val} {duration_unit}
 💵 مبلغ: {format_money(plan.price)} تومان{discount_lines}
 
 آیا تایید می‌کنید؟"""
@@ -561,25 +536,28 @@ def _discount_amount(price: int, discount: DiceRoll | None) -> int:
 
 
 def _approved_wallet_message(result) -> str:
-    if result.waiting_inventory:
-        return "پرداخت شما تایید شد، اما موجودی سرویس انتخاب‌شده به پایان رسیده است. پشتیبانی به‌زودی سرویس شما را ارسال می‌کند."
     wallet_line = f"\n\n🏦 موجودی کیف پول: {format_money(result.wallet_balance)} تومان" if result.wallet_balance is not None else ""
+    
+    # --- FIXED: Safely fetch the duration parameter and format it cleanly ---
+    hours = getattr(result, "duration_hours", None) or getattr(result, "duration_days", 0)
+    duration_val = hours // 24 if hours >= 24 and hours % 24 == 0 else hours
+    duration_unit = "روز" if hours >= 24 and hours % 24 == 0 else "ساعت"
+    # -------------------------------------------------------------------------
+
     if result.order_kind == OrderKind.RENEWAL.value:
-        return f"""✅ پرداخت از کیف پول انجام شد و تمدید سرویس شما با موفقیت ثبت شد.
+        return f"""✅ پرداخت از کیف پول انجام شد و تمدید اشتراک شما با موفقیت ثبت شد.
 
-👤 نام کاربری: {escape(result.service_username)}
+👤 نام دستگاه: {escape(result.service_username)}
 ⚡ پلن تمدید: {escape(result.plan_title)}
-📦 حجم افزوده: {result.volume_gb} گیگ
-🗓 اعتبار افزوده: {result.duration_days} روز{wallet_line}"""
+🗓 اعتبار افزوده: {duration_val} {duration_unit}{wallet_line}"""
 
-    config_line = f"\n🔗 کانفیگ شما:\n{escape(result.config_link)}" if result.config_link else ""
-    subscription_line = f"\n\n🔗 لینک اشتراک:\n{escape(result.subscription_link)}" if result.subscription_link else ""
-    return f"""✅ پرداخت از کیف پول انجام شد و سرویس شما ساخته شد.
+    config_line = f"\n🌐 دی‌ان‌اس DoH شما:\n`{escape(result.config_link)}`" if result.config_link else ""
+    subscription_line = f"\n\n🔒 آدرس DoT شما:\n`{escape(result.subscription_link)}`" if result.subscription_link else ""
+    return f"""✅ پرداخت از کیف پول انجام شد و اشتراک شما با موفقیت ساخته شد.
 
-👤 نام کاربری: {escape(result.service_username)}
+👤 نام دستگاه: {escape(result.service_username)}
 ⚡ پلن: {escape(result.plan_title)}
-📦 حجم: {result.volume_gb} گیگ
-🗓 اعتبار: {result.duration_days} روز
+🗓 اعتبار: {duration_val} {duration_unit}
 {config_line}{subscription_line}{wallet_line}"""
 
 

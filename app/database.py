@@ -1,4 +1,5 @@
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
+from sqlalchemy import make_url as sqlalchemy_make_url
 from sqlalchemy.orm import DeclarativeBase
 
 from app.config import get_settings
@@ -10,13 +11,19 @@ class Base(AsyncAttrs, DeclarativeBase):
 
 settings = get_settings()
 
+# Configure database URL with connection timeouts
+db_url = sqlalchemy_make_url(settings.database_url)
 engine = create_async_engine(
-    settings.database_url,
+    str(db_url),
     pool_pre_ping=True,
-    pool_size=20,           # Increased from default 5
-    max_overflow=10,        # Allow 10 overflow connections
-    pool_recycle=3600,      # Recycle connections every hour
-    echo=False,             # Set to True only for debugging
+    pool_size=20,
+    max_overflow=10,
+    pool_recycle=3600,
+    echo=False,
+    connect_args={
+        "timeout": 10.0,
+        "command_timeout": 30.0,
+    }
 )
 
 async_session_maker = async_sessionmaker(

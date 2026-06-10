@@ -1,3 +1,4 @@
+# Open app/services/payment_service.py
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -20,16 +21,10 @@ from app.repositories.dice_rolls import DiceRollsRepository
 from app.repositories.services import ServicesRepository
 from app.repositories.wallet_transactions import WalletTransactionsRepository
 from app.services.affiliate_service import AffiliateService
-from app.services.inventory_service import (
-    InventoryUnavailableError,
-    mark_config_sold,
-    release_reserved_config,
-)
+from app.services.controld import create_dns_device, ControlDService  # Control D Integration
 from app.services.order_service import OrderService
 from app.services.referral_service import ReferralService
-from app.services.renewal_service import RenewalService
 from app.services.settings_service import AppSettingsService
-from app.services.vpn_panel import VPNPanelService
 
 
 class PaymentApprovalError(Exception):
@@ -65,6 +60,13 @@ class ApprovedPaymentResult:
     wallet_balance: int | None = None
     waiting_inventory: bool = False
     plan_id: int | None = None
+    resolver_id: str | None = None
+    stamp: str | None = None
+
+    # --- ADDED: Control D Legacy IP Attributes ---
+    ipv4: str | None = None
+    ipv6: str | None = None
+    # ----------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -73,9 +75,8 @@ class RejectedPaymentResult:
 
 
 class PaymentService:
-    def __init__(self, session: AsyncSession, vpn_panel: VPNPanelService, settings: Settings | None = None) -> None:
+    def __init__(self, session: AsyncSession, vpn_panel: object = None, settings: Settings | None = None) -> None:
         self.session = session
-        self.vpn_panel = vpn_panel
         self.settings = settings
         self.app_settings = AppSettingsService(session)
 
@@ -97,7 +98,6 @@ class PaymentService:
         if self._is_unpaid_order_expired(order, payment):
             order.status = OrderStatus.EXPIRED.value
             payment.status = PaymentStatus.EXPIRED.value
-            await release_reserved_config(self.session, order.id)
             await self.session.commit()
             raise PaymentExpiredError("Order expired")
         if order.order_kind == OrderKind.RENEWAL.value and order.renewal_service is None:
@@ -134,7 +134,6 @@ class PaymentService:
         payment.verified_at = datetime.now(timezone.utc)
         if payment.order:
             payment.order.status = OrderStatus.FAILED.value
-            await release_reserved_config(self.session, payment.order.id)
             if self.settings is not None:
                 await AffiliateService(self.session, self.settings).reverse_order_commissions(payment.order.id)
         await self.session.commit()
@@ -162,7 +161,6 @@ class PaymentService:
         if OrderService.is_order_expired(order):
             order.status = OrderStatus.EXPIRED.value
             payment.status = PaymentStatus.EXPIRED.value
-            await release_reserved_config(self.session, order.id)
             await self.session.commit()
             raise PaymentExpiredError("Order expired")
         if user.wallet_balance < order.amount:
@@ -248,55 +246,66 @@ class PaymentService:
             approved_at=now,
         )
 
+
     async def _complete_purchase(self, order: Order, now: datetime) -> ApprovedPaymentResult:
         plan = order.plan
         user = order.user
         username = order.custom_username or f"user{user.telegram_id}"
 
-        try:
-            inventory_item = await mark_config_sold(self.session, order.id, user.id)
-            config_link = inventory_item.config_link
-            subscription_link = inventory_item.subscription_link
-            username = order.custom_username or inventory_item.username or username
-            config_inventory_id = inventory_item.id
-        except InventoryUnavailableError:
-            if not (self.settings and self.settings.allow_placeholder_configs):
-                order.status = OrderStatus.WAITING_INVENTORY.value
-                return ApprovedPaymentResult(
-                    user_telegram_id=user.telegram_id,
-                    order_kind=OrderKind.PURCHASE.value,
-                    service_username=username,
-                    plan_title=plan.title,
-                    volume_gb=plan.volume_gb,
-                    duration_days=plan.duration_days,
-                    config_link=None,
-                    subscription_link=None,
-                    waiting_inventory=True,
-                    plan_id=plan.id,
-                )
-            provisioned = await self.vpn_panel.provision_user(
-                username=username,
-                volume_gb=plan.volume_gb,
-                duration_days=plan.duration_days,
-            )
-            config_link = provisioned.config_link
-            subscription_link = provisioned.subscription_link
-            config_inventory_id = None
+        # 1. Fetch the Control D Profile ID mapped to this plan
+        profile_id = plan.controld_profile_id
+        if not profile_id:
+            profile_id = self.settings.controld_profile_id if self.settings else ""
+
+        if not profile_id:
+            raise PaymentApprovalError("Control D Profile ID is not configured for this plan")
+
+        # 2. Generate a unique name using order tracking code to prevent collisions
+        unique_device_name = f"tg_user_{user.telegram_id}_{order.tracking_code}"
+        
+        # 3. Call Control D API with the plan's duration_hours
+        dns_data = await create_dns_device(
+            tg_user_id=user.telegram_id, 
+            profile_id=profile_id,
+            duration_hours=plan.duration_hours,
+            device_name=unique_device_name
+        )
+        
+        if dns_data is None:
+            order.status = OrderStatus.FAILED.value
+            await self.session.commit()
+            raise PaymentApprovalError("Failed to provision DNS endpoint on Control D API")
+
+       # Locate the return statement of your _complete_purchase function (around line 304) and update:
+
+        config_link = dns_data["doh"]
+        subscription_link = dns_data["dot"]
+        device_id = dns_data["device_id"]
+        ipv4 = dns_data.get("ipv4")
+        ipv6 = dns_data.get("ipv6")
+        
+        # --- FIXED: Extract advanced parameters ---
+        resolver_id = dns_data.get("resolver_id")
+        stamp = dns_data.get("stamp")
+        # -------------------------------------------
 
         services = ServicesRepository(self.session)
-        await services.create(
+        new_service = await services.create(
             user_id=user.id,
             order_id=order.id,
             plan_id=plan.id,
-            config_inventory_id=config_inventory_id,
+            config_inventory_id=None,
             username=username,
             config_link=config_link,
             subscription_link=subscription_link,
             volume_gb=plan.volume_gb,
-            duration_days=plan.duration_days,
-            expire_at=now + timedelta(days=plan.duration_days),
+            duration_days=plan.duration_hours,
+            expire_at=now + timedelta(hours=plan.duration_hours),
             status=VPNServiceStatus.ACTIVE.value,
         )
+        
+        new_service.controld_device_id = device_id
+        await self.session.flush()
 
         reward_amount = await self.app_settings.get_referral_reward_amount()
         await ReferralService(self.session).grant_first_purchase_reward(
@@ -311,10 +320,16 @@ class PaymentService:
             service_username=username,
             plan_title=plan.title,
             volume_gb=plan.volume_gb,
-            duration_days=plan.duration_days,
+            duration_days=plan.duration_hours,
             config_link=config_link,
             subscription_link=subscription_link,
             plan_id=plan.id,
+            ipv4=ipv4,
+            ipv6=ipv6,
+            # --- FIXED: Return advanced fields ---
+            resolver_id=resolver_id,
+            stamp=stamp
+            # --------------------------------------
         )
 
     async def _complete_renewal(self, order: Order, now: datetime) -> ApprovedPaymentResult:
@@ -324,11 +339,31 @@ class PaymentService:
         if service is None:
             raise PaymentApprovalError("Renewal service not found")
 
-        new_expire_at = await RenewalService(self.vpn_panel).extend_service(
-            service=service,
-            plan=plan,
-            now=now,
+        # Since active DNS configurations on Control D do not auto-expire unless we manually delete them,
+        # we can renew the customer locally simply by extending their expire date in our database.
+        current_expire = service.expire_at
+        if current_expire.tzinfo is None:
+            current_expire = current_expire.replace(tzinfo=timezone.utc)
+
+        # --- FIXED: Accumulate time using hours instead of days ---
+        if current_expire > now:
+            new_expire_at = current_expire + timedelta(hours=plan.duration_hours)
+        else:
+            new_expire_at = now + timedelta(hours=plan.duration_hours)
+        # ----------------------------------------------------------
+
+        service.expire_at = new_expire_at
+        service.status = VPNServiceStatus.ACTIVE.value
+        await self.session.flush()
+
+        # --- FIXED: Update the TTL on Control D for the renewal ---
+        new_disable_ttl = int(new_expire_at.timestamp())
+        controld_service = ControlDService(self.settings)
+        await controld_service.update_device(
+            device_id=service.controld_device_id,
+            disable_ttl=new_disable_ttl
         )
+        # ----------------------------------------------------------
 
         return ApprovedPaymentResult(
             user_telegram_id=user.telegram_id,
@@ -336,7 +371,7 @@ class PaymentService:
             service_username=service.username,
             plan_title=plan.title,
             volume_gb=plan.volume_gb,
-            duration_days=plan.duration_days,
+            duration_days=plan.duration_hours,  # Pass hours cleanly
             config_link=service.config_link,
             subscription_link=service.subscription_link,
             new_expire_at=new_expire_at,

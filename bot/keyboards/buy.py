@@ -31,25 +31,36 @@ class PurchaseDiscountCallback(CallbackData, prefix="buy_disc"):
     plan_id: int
 
 
-def plans_keyboard(plans: list[Plan], inventory_counts: dict[int, int] | None = None) -> InlineKeyboardMarkup:
-    return plans_inline_keyboard(plans, inventory_counts)
+# Open bot/keyboards/buy.py
+from aiogram.types import InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from app.models import Plan
+from bot.keyboards.buy import PlanCallback, BUY_BACK_TO_MENU  # Ensure imports are present
 
-
-def plans_inline_keyboard(plans: list[Plan], inventory_counts: dict[int, int] | None = None) -> InlineKeyboardMarkup:
+def plans_keyboard(plans: list[Plan], counts: dict = None) -> InlineKeyboardMarkup:
+    """
+    Generates a clean purchase keyboard for DNS plans.
+    Completely removes legacy V2Ray volume (GB) and stock (موجودی) text.
+    """
     builder = InlineKeyboardBuilder()
+    
     for plan in plans:
-        available_count = inventory_counts.get(plan.id) if inventory_counts is not None else None
-        if available_count is not None and available_count <= 0:
-            continue
-        inventory_text = f" | موجودی: {available_count}" if available_count is not None else ""
+        # Format the price with commas (e.g., 1,100,000)
+        formatted_price = f"{plan.price:,}"
+        
+        # --- FIXED: Only show Plan Title and Formatted Price ---
         builder.button(
-            text=f"{plan.title} | {plan.volume_gb} گیگ | {format_toman(plan.price)} تومان{inventory_text}",
-            callback_data=PlanCallback(plan_id=plan.id),
+            text=f"🔹 {plan.title} - {formatted_price} تومان 🔹",
+            callback_data=PlanCallback(plan_id=plan.id)
         )
-    builder.button(text=texts.BTN_BACK, callback_data=BUY_BACK_TO_MENU)
-    builder.adjust(1)
-    return builder.as_markup()
+        # -------------------------------------------------------
 
+    # Test account and Back buttons
+    builder.button(text="🎁 دریافت اکانت تست (۲ ساعته) 🆓", callback_data="get_test_account")
+    builder.button(text="↩️ بازگشت", callback_data=BUY_BACK_TO_MENU)
+    builder.adjust(1)
+    
+    return builder.as_markup()
 
 def pre_invoice_keyboard(plan_id: int, discount_roll_id: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()

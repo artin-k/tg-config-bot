@@ -3,8 +3,6 @@ from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.models import (
-    ConfigInventory,
-    ConfigInventoryStatus,
     Payment,
     Plan,
     TestAccount,
@@ -12,7 +10,6 @@ from app.models import (
     VPNService,
     WalletTransaction,
     WalletWithdrawalRequest,
-
 )
 from app.services.settings_service import SETTING_DEFINITIONS
 
@@ -58,6 +55,12 @@ class AdminSettingCallback(CallbackData, prefix="adm_set"):
     key: str = "_"
 
 
+class AdminWithdrawalCallback(CallbackData, prefix="adm_wd"):
+    action: str
+    withdrawal_id: int = 0
+
+
+# --- SKELETON CALLBACK TO PREVENT IMPORT ERRORS IN admin.py ---
 class AdminInventoryCallback(CallbackData, prefix="adm_inv"):
     action: str
     plan_id: int = 0
@@ -66,17 +69,12 @@ class AdminInventoryCallback(CallbackData, prefix="adm_inv"):
     status: str = "all"
 
 
-class AdminWithdrawalCallback(CallbackData, prefix="adm_wd"):
-    action: str
-    withdrawal_id: int = 0
-
-
 def admin_main_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="📦 فروش و تعرفه‌ها", callback_data=AdminActionCallback(action="cat_sales"))
+    builder.button(text="📦 فروش و تعرفه‌های DNS", callback_data=AdminActionCallback(action="cat_sales"))
     builder.button(text="👥 کاربران و زیرمجموعه‌ها", callback_data=AdminActionCallback(action="cat_users"))
     builder.button(text="💳 پرداخت‌ها و کیف پول", callback_data=AdminActionCallback(action="cat_payments"))
-    builder.button(text="🛍 سرویس‌ها", callback_data=AdminActionCallback(action="cat_services"))
+    builder.button(text="🛍 اشتراک‌های DNS", callback_data=AdminActionCallback(action="cat_services"))
     builder.button(text="📣 ارتباطات", callback_data=AdminActionCallback(action="cat_comms"))
     builder.button(text="⚙️ تنظیمات", callback_data=AdminActionCallback(action="cat_settings"))
     builder.button(text="📢 مدیریت کانال‌های اجباری", callback_data=AdminActionCallback(action="open_channels_menu"))
@@ -92,106 +90,49 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
 
 def admin_sales_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="📦 مدیریت تعرفه‌ها", callback_data=AdminActionCallback(action="plans"))
-    builder.button(text="📦 موجودی کانفیگ‌ها", callback_data=AdminActionCallback(action="inventory"))
-    builder.button(text="🧾 سفارش‌ها", callback_data=AdminActionCallback(action="orders"))
-    builder.button(text="📈 گزارش فروش", callback_data=AdminActionCallback(action="sales_report"))
+    builder.button(text="📦 مدیریت تعرفه‌های DNS", callback_data=AdminActionCallback(action="plans"))
+    # Note: Inventory/Stock configuration button is removed here since DNS is unlimited
+    builder.button(text="🧾 سفارش‌ها و رزروها", callback_data=AdminActionCallback(action="orders"))
+    builder.button(text="📈 گزارش فروش کل", callback_data=AdminActionCallback(action="sales_report"))
     builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="panel"))
     builder.adjust(1)
     return builder.as_markup()
 
 
+# --- SKELETON INVENTORY KEYBOARDS TO PREVENT IMPORT ERRORS ---
 def inventory_main_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="📊 خلاصه موجودی", callback_data=AdminInventoryCallback(action="summary"))
-    builder.button(text="➕ افزودن کانفیگ", callback_data=AdminInventoryCallback(action="add_plan"))
-    builder.button(text="📥 افزودن گروهی کانفیگ‌ها", callback_data=AdminInventoryCallback(action="bulk_plan"))
-    builder.button(text="📋 لیست کانفیگ‌ها", callback_data=AdminInventoryCallback(action="list_plan"))
-    builder.button(text="🔍 جستجوی کانفیگ", callback_data=AdminInventoryCallback(action="search"))
-    builder.button(text="⚠️ تعرفه‌های کم‌موجودی", callback_data=AdminInventoryCallback(action="low"))
     builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="cat_sales"))
     builder.adjust(1)
     return builder.as_markup()
 
 
 def inventory_plan_select_keyboard(plans: list[Plan], action: str) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for plan in plans:
-        builder.button(text=plan.title, callback_data=AdminInventoryCallback(action=action, plan_id=plan.id))
-    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="inventory"))
-    builder.adjust(1)
-    return builder.as_markup()
+    return inventory_main_keyboard()
 
 
 def inventory_status_filter_keyboard(plan_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    statuses = [
-        ("همه", "all"),
-        ("🟢 آماده فروش", ConfigInventoryStatus.AVAILABLE.value),
-        ("🟡 رزرو شده", ConfigInventoryStatus.RESERVED.value),
-        ("🔴 فروخته شده", ConfigInventoryStatus.SOLD.value),
-        ("⚫ غیرفعال", ConfigInventoryStatus.DISABLED.value),
-    ]
-    for label, status in statuses:
-        builder.button(text=label, callback_data=AdminInventoryCallback(action="list", plan_id=plan_id, status=status))
-    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="inventory"))
-    builder.adjust(1)
-    return builder.as_markup()
+    return inventory_main_keyboard()
 
 
 def inventory_list_keyboard(
-    items: list[ConfigInventory],
+    items: list,
     *,
     plan_id: int,
     status: str,
     page: int,
     has_next: bool,
 ) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for item in items:
-        builder.button(
-            text=f"#{item.id} | {item.status}",
-            callback_data=AdminInventoryCallback(action="detail", item_id=item.id, plan_id=plan_id, status=status, page=page),
-        )
-    if page > 0:
-        builder.button(
-            text="⬅️ صفحه قبل",
-            callback_data=AdminInventoryCallback(action="list", plan_id=plan_id, status=status, page=page - 1),
-        )
-    if has_next:
-        builder.button(
-            text="صفحه بعد ➡️",
-            callback_data=AdminInventoryCallback(action="list", plan_id=plan_id, status=status, page=page + 1),
-        )
-    builder.button(text="↩️ فیلترها", callback_data=AdminInventoryCallback(action="list_status", plan_id=plan_id))
-    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="inventory"))
-    builder.adjust(1)
-    return builder.as_markup()
+    return inventory_main_keyboard()
 
 
-def inventory_detail_keyboard(item: ConfigInventory) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    if item.status == ConfigInventoryStatus.AVAILABLE.value:
-        builder.button(text="⚫ غیرفعال کردن", callback_data=AdminInventoryCallback(action="disable", item_id=item.id))
-    elif item.status == ConfigInventoryStatus.DISABLED.value:
-        builder.button(text="🟢 فعال کردن", callback_data=AdminInventoryCallback(action="enable", item_id=item.id))
-    if item.status in {ConfigInventoryStatus.AVAILABLE.value, ConfigInventoryStatus.DISABLED.value}:
-        builder.button(text="🗑 حذف", callback_data=AdminInventoryCallback(action="delete", item_id=item.id))
-    builder.button(text="✏️ ویرایش لینک کانفیگ", callback_data=AdminInventoryCallback(action="edit_config", item_id=item.id))
-    builder.button(text="✏️ ویرایش لینک اشتراک", callback_data=AdminInventoryCallback(action="edit_sub", item_id=item.id))
-    builder.button(text="✏️ ویرایش یادداشت", callback_data=AdminInventoryCallback(action="edit_note", item_id=item.id))
-    builder.button(text="↩️ بازگشت", callback_data=AdminInventoryCallback(action="list", plan_id=item.plan_id))
-    builder.adjust(1)
-    return builder.as_markup()
+def inventory_detail_keyboard(item: object) -> InlineKeyboardMarkup:
+    return inventory_main_keyboard()
 
 
-def inventory_search_results_keyboard(items: list[ConfigInventory]) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for item in items:
-        builder.button(text=f"#{item.id} | {item.status}", callback_data=AdminInventoryCallback(action="detail", item_id=item.id))
-    builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="inventory"))
-    builder.adjust(1)
-    return builder.as_markup()
+def inventory_search_results_keyboard(items: list) -> InlineKeyboardMarkup:
+    return inventory_main_keyboard()
+# -------------------------------------------------------------
 
 
 def admin_users_affiliate_keyboard() -> InlineKeyboardMarkup:
@@ -218,8 +159,8 @@ def admin_payments_keyboard() -> InlineKeyboardMarkup:
 
 def admin_services_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="🛍 لیست سرویس‌ها", callback_data=AdminActionCallback(action="services"))
-    builder.button(text="🔎 جستجوی سرویس", callback_data=AdminServiceCallback(action="search"))
+    builder.button(text="🛍 لیست اشتراک‌های DNS", callback_data=AdminActionCallback(action="services"))
+    builder.button(text="🔎 جستجوی اشتراک DNS", callback_data=AdminServiceCallback(action="search"))
     builder.button(text="🔑 اکانت تست", callback_data=AdminActionCallback(action="test_accounts"))
     builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="panel"))
     builder.adjust(1)
@@ -471,12 +412,10 @@ def plans_management_keyboard(plans: list[Plan]) -> InlineKeyboardMarkup:
     for plan in plans:
         status_emoji = "🟢" if plan.is_active else "🔴"
         
-        # Button 1: Management Detail (shows emoji label + title)
         builder.button(
             text=f"⚙️ {status_emoji} {plan.title}",
             callback_data=AdminPlanCallback(action="detail", plan_id=plan.id),
         )
-        # Button 2: Quick Delete
         builder.button(
             text="🗑 حذف",
             callback_data=AdminPlanCallback(action="delete", plan_id=plan.id),
@@ -485,14 +424,12 @@ def plans_management_keyboard(plans: list[Plan]) -> InlineKeyboardMarkup:
     builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="panel"))
     
     if plans:
-        # First row: Add Plan (1 button)
-        # Then, each plan row has exactly 2 buttons: [⚙️ Detail] [🗑 Delete]
-        # Last row: Back (1 button)
         builder.adjust(1, *([2] * len(plans)), 1)
     else:
         builder.adjust(1)
         
     return builder.as_markup()
+
 
 def plan_delete_confirm_keyboard(plan: Plan) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -556,7 +493,7 @@ def user_detail_keyboard(user: User, *, viewer_id: int) -> InlineKeyboardMarkup:
     if user.telegram_id != viewer_id:
         builder.button(text="تغییر وضعیت ادمین", callback_data=AdminUserCallback(action="toggle_admin", user_id=user.id))
     builder.button(text="🧾 سفارش‌های کاربر", callback_data=AdminUserCallback(action="orders", user_id=user.id))
-    builder.button(text="🛍 سرویس‌های کاربر", callback_data=AdminUserCallback(action="services", user_id=user.id))
+    builder.button(text="🛍 اشتراک‌های کاربر", callback_data=AdminUserCallback(action="services", user_id=user.id))
     builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="users"))
     builder.adjust(1)
     return builder.as_markup()
@@ -564,7 +501,7 @@ def user_detail_keyboard(user: User, *, viewer_id: int) -> InlineKeyboardMarkup:
 
 def services_admin_keyboard(services: list[VPNService]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="🔎 جستجوی سرویس", callback_data=AdminServiceCallback(action="search"))
+    builder.button(text="🔎 جستجوی اشتراک DNS", callback_data=AdminServiceCallback(action="search"))
     for service in services:
         builder.button(text=f"🛍 {service.username}", callback_data=AdminServiceCallback(action="detail", service_id=service.id))
     builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="panel"))
@@ -577,19 +514,23 @@ def service_detail_keyboard(service: VPNService) -> InlineKeyboardMarkup:
     builder.button(text="🟢 فعال کردن", callback_data=AdminServiceCallback(action="activate", service_id=service.id))
     builder.button(text="🔴 غیرفعال کردن", callback_data=AdminServiceCallback(action="disable", service_id=service.id))
     builder.button(text="🗓 تمدید دستی", callback_data=AdminServiceCallback(action="extend", service_id=service.id))
-    builder.button(text="🔗 ویرایش لینک کانفیگ", callback_data=AdminServiceCallback(action="edit_config", service_id=service.id))
-    builder.button(text="🔗 ویرایش لینک اشتراک", callback_data=AdminServiceCallback(action="edit_sub", service_id=service.id))
+    builder.button(text="🔗 ویرایش DoH", callback_data=AdminServiceCallback(action="edit_config", service_id=service.id))
+    builder.button(text="🔗 ویرایش DoT", callback_data=AdminServiceCallback(action="edit_sub", service_id=service.id))
     builder.button(text="↩️ بازگشت", callback_data=AdminActionCallback(action="services"))
     builder.adjust(1)
     return builder.as_markup()
 
+
+# Open bot/keyboards/admin.py
 
 def plan_detail_keyboard(plan: Plan) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ ویرایش عنوان", callback_data=AdminPlanCallback(action="edit_title", plan_id=plan.id))
     builder.button(text="📝 ویرایش توضیحات", callback_data=AdminPlanCallback(action="edit_desc", plan_id=plan.id))
     builder.button(text="🗓 ویرایش مدت", callback_data=AdminPlanCallback(action="edit_duration", plan_id=plan.id))
-    builder.button(text="📦 ویرایش حجم", callback_data=AdminPlanCallback(action="edit_volume", plan_id=plan.id))
+    
+    # --- REMOVED: builder.button(text="📦 ویرایش حجم", ...) ---
+    
     builder.button(text="💵 ویرایش قیمت", callback_data=AdminPlanCallback(action="edit_price", plan_id=plan.id))
     builder.button(text="🔢 ویرایش ترتیب نمایش", callback_data=AdminPlanCallback(action="edit_sort", plan_id=plan.id))
     toggle_text = "🔴 غیرفعال کردن" if plan.is_active else "🟢 فعال کردن"

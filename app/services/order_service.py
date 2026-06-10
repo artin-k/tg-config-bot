@@ -3,13 +3,15 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.models import Order, OrderKind, OrderStatus, PaymentStatus, Plan, User
+from app.models import Order, OrderKind, OrderStatus, Plan, User
 from app.repositories.orders import OrdersRepository
 from app.repositories.payments import PaymentsRepository
-from app.services.inventory_service import InventoryUnavailableError, reserve_config_for_order
+from app.services.inventory_service import reserve_config_for_order
+from app.services.inventory_service import reserve_config_for_order
 from app.services.settings_service import AppSettingsService
 from app.utils.tracking import generate_tracking_code
 
+from app.models import Order, OrderKind, OrderStatus, PaymentStatus, Plan, User
 
 class OrderService:
     def __init__(self, session: AsyncSession, settings: Settings) -> None:
@@ -20,50 +22,48 @@ class OrderService:
         self.payments = PaymentsRepository(session)
 
     async def create_order_with_payment(
-        self,
-        *,
-        user: User,
-        plan: Plan,
-        custom_username: str | None,
-        order_kind: str = OrderKind.PURCHASE.value,
-        service_id: int | None = None,
-        discount_code: str | None = None,
-        discount_percent: int = 0,
-        discount_amount: int = 0,
-    ) -> tuple[Order, object]:
-        tracking_code = await self._generate_unique_tracking_code()
-        order_expire_minutes = await self.app_settings.get_order_expire_minutes()
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=order_expire_minutes)
-        final_amount = max(plan.price - discount_amount, 0)
+            self,
+            *,
+            user: User,
+            plan: Plan,
+            custom_username: str | None,
+            order_kind: str = OrderKind.PURCHASE.value,
+            service_id: int | None = None,
+            discount_code: str | None = None,
+            discount_percent: int = 0,
+            discount_amount: int = 0,
+        ) -> tuple[Order, object]:
+            tracking_code = await self._generate_unique_tracking_code()
+            order_expire_minutes = await self.app_settings.get_order_expire_minutes()
+            expires_at = datetime.now(timezone.utc) + timedelta(minutes=order_expire_minutes)
+            final_amount = max(plan.price - discount_amount, 0)
 
-        order = await self.orders.create(
-            user_id=user.id,
-            plan_id=plan.id,
-            custom_username=custom_username,
-            order_kind=order_kind,
-            service_id=service_id,
-            tracking_code=tracking_code,
-            amount=final_amount,
-            discount_code=discount_code,
-            discount_percent=discount_percent,
-            discount_amount=discount_amount,
-            status=OrderStatus.PENDING_PAYMENT.value,
-            expires_at=expires_at,
-        )
-        payment = await self.payments.create(
-            order_id=order.id,
-            user_id=user.id,
-            amount=final_amount,
-        )
-        if order_kind == OrderKind.PURCHASE.value:
-            inventory_item = await reserve_config_for_order(self.session, plan.id, order.id)
-            if inventory_item is None:
-                order.status = OrderStatus.FAILED.value
-                payment.status = PaymentStatus.EXPIRED.value
-                await self.session.commit()
-                raise InventoryUnavailableError("No config inventory available")
-        await self.session.commit()
-        return order, payment
+            order = await self.orders.create(
+                user_id=user.id,
+                plan_id=plan.id,
+                custom_username=custom_username,
+                order_kind=order_kind,
+                service_id=service_id,
+                tracking_code=tracking_code,
+                amount=final_amount,
+                discount_code=discount_code,
+                discount_percent=discount_percent,
+                discount_amount=discount_amount,
+                status=OrderStatus.PENDING_PAYMENT.value,
+                expires_at=expires_at,
+            )
+            payment = await self.payments.create(
+                order_id=order.id,
+                user_id=user.id,
+                amount=final_amount,
+            )
+            
+            # --- REMOVED: Inventory stock checks and reservations (Not needed for DNS) ---
+            
+            await self.session.commit()
+            
+            # --- RETURN DIRECTLY to avoid SQLAlchemy async lazy-load crashes ---
+            return order, payment
 
     async def expire_order_if_unpaid(self, order: Order) -> bool:
         if not self.is_order_expired(order):
@@ -73,9 +73,9 @@ class OrderService:
         order.status = OrderStatus.EXPIRED.value
         if order.payment and order.payment.status == PaymentStatus.PENDING.value:
             order.payment.status = PaymentStatus.EXPIRED.value
-        from app.services.inventory_service import release_reserved_config
-
-        await release_reserved_config(self.session, order.id)
+            
+        # --- REMOVED: Release inventory config ---
+        
         await self.session.commit()
         return True
 

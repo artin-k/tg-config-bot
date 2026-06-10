@@ -125,7 +125,7 @@ class User(TimestampMixin, Base):
     phone_number: Mapped[str | None] = mapped_column(String(32))
     is_phone_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    wallet_balance: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    wallet_balance: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     referral_code: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
     referred_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     referral_depth: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
@@ -176,14 +176,17 @@ class User(TimestampMixin, Base):
 class Plan(TimestampMixin, Base):
     __tablename__ = "plans"
 
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
-    duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=720) # 720 hours = 30 days
     volume_gb: Mapped[int] = mapped_column(Integer, nullable=False)
     price: Mapped[int] = mapped_column(Integer, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+    controld_profile_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     orders: Mapped[list[Order]] = relationship(back_populates="plan")
     services: Mapped[list[VPNService]] = relationship(back_populates="plan")
@@ -236,6 +239,21 @@ class Order(TimestampMixin, Base):
     )
 
 
+class Subscription(TimestampMixin, Base):
+    __tablename__ = "subscriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Telegram user id (BigInteger) as requested in the spec
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("plans.id", ondelete="RESTRICT"), index=True, nullable=False)
+    controld_device_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    doh_link: Mapped[str | None] = mapped_column(Text)
+    expire_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active", server_default="active")
+
+    plan: Mapped[Plan] = relationship()
+
+
 class Payment(TimestampMixin, Base):
     __tablename__ = "payments"
 
@@ -246,7 +264,7 @@ class Payment(TimestampMixin, Base):
         index=True,
     )
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
-    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    amount: Mapped[int] = mapped_column(BigInteger, nullable=False)
     method: Mapped[str] = mapped_column(String(32), nullable=False, default="manual", server_default="manual")
     status: Mapped[str] = mapped_column(
         String(32),
@@ -269,7 +287,7 @@ class WalletTransaction(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
-    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    amount: Mapped[int] = mapped_column(BigInteger, nullable=False)
     type: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(
         String(32),
@@ -297,7 +315,7 @@ class WalletWithdrawalRequest(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
-    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    amount: Mapped[int] = mapped_column(BigInteger, nullable=False)
     status: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
@@ -342,6 +360,9 @@ class VPNService(TimestampMixin, Base):
         ForeignKey("config_inventory.id", ondelete="SET NULL"),
         index=True,
     )
+    controld_device_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    is_test_account: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    
     username: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     config_link: Mapped[str | None] = mapped_column(Text)
     subscription_link: Mapped[str | None] = mapped_column(Text)
@@ -354,6 +375,8 @@ class VPNService(TimestampMixin, Base):
         default=VPNServiceStatus.ACTIVE.value,
         server_default=VPNServiceStatus.ACTIVE.value,
     )
+
+    controld_device_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     user: Mapped[User] = relationship(back_populates="services")
     order: Mapped[Order] = relationship(back_populates="vpn_service", foreign_keys=[order_id])

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from html import escape
 from zoneinfo import ZoneInfo
@@ -24,6 +25,7 @@ from app.models import (
     OrderKind,
     OrderStatus,       # <-- Added
     Payment,
+    PaymentStatus,
     User,
     VPNService,        # <-- Added
     VPNServiceStatus,
@@ -38,11 +40,14 @@ from app.repositories.dice_rolls import DiceRollsRepository
 from app.repositories.orders import OrdersRepository
 from app.repositories.payments import PaymentsRepository
 from app.repositories.plans import PlansRepository
+from app.repositories.reports import ReportsRepository
 from app.repositories.services import ServicesRepository
+from app.repositories.subscriptions import SubscriptionsRepository
 from app.repositories.test_accounts import TestAccountsRepository
 from app.repositories.users import UsersRepository
 from app.repositories.wallet_transactions import WalletTransactionsRepository
 from app.repositories.wallet_withdrawals import WalletWithdrawalsRepository
+from app.services.controld import ControlDService
 from app.services.order_status import order_kind_label
 from app.services.affiliate_service import AffiliateService
 from app.services.inventory_service import (
@@ -180,11 +185,15 @@ class AdminOrderCallback(CallbackData, prefix="adm_ord"):
     order_id: int = 0
     page: int = 0
 
+# Open bot/routers/admin.py
+# Locate your EDIT_FIELD_MAP dictionary (around line 50) and update:
+
 EDIT_FIELD_MAP = {
     "edit_title": ("title", "عنوان جدید تعرفه را ارسال کنید:", "title"),
     "edit_desc": ("description", "توضیحات جدید را ارسال کنید. برای خالی کردن، - بفرستید:", "description"),
-    "edit_duration": ("duration_days", "مدت جدید را به روز ارسال کنید:", "positive_int"),
-    "edit_volume": ("volume_gb", "حجم جدید را به گیگ ارسال کنید:", "positive_int"),
+    # --- UPDATED: Maps edit_duration to duration_hours and prompts for hours ---
+    "edit_duration": ("duration_hours", "مدت جدید را به ساعت ارسال کنید (مثال: 720 برای ۳۰ روز):", "positive_int"),
+    # ----------------------------------------------------------------------------
     "edit_price": ("price", "قیمت جدید را به تومان ارسال کنید:", "positive_int"),
     "edit_sort": ("sort_order", "ترتیب نمایش جدید را ارسال کنید. مقدار 0 مجاز است:", "int"),
 }
@@ -283,6 +292,151 @@ async def admin_order_callback(
         await callback.message.answer(f"✅ سفارش {tracking_code} به همراه اطلاعات پرداخت کاملاً حذف شد.")
         await _show_recent_orders(callback, session)
         return
+
+
+@router.callback_query(F.data.startswith("admin_manual_activate:"))
+async def admin_manual_activate_order(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    if not await _is_admin(callback.from_user.id if callback.from_user else None, session, settings):
+        await callback.answer("⛔ شما دسترسی مدیریت ندارید.", show_alert=True)
+        return
+    await callback.answer()
+    await state.clear()
+
+    if callback.message is None:
+        return
+
+    try:
+        order_id = int((callback.data or "").split(":", 1)[1])
+    except (IndexError, ValueError):
+        await callback.message.answer("❌ اطلاعات سفارش معتبر نیست.")
+        return
+
+    order = await OrdersRepository(session).get_with_details(order_id)
+    if order is None:
+        await callback.message.answer("❌ سفارش پیدا نشد.")
+        return
+    if order.status == OrderStatus.COMPLETED.value:
+        await callback.answer("این سفارش قبلاً تکمیل شده است.", show_alert=True)
+        return
+    if order.vpn_service is not None:
+        await callback.message.answer("⚠️ برای این سفارش قبلاً سرویس ثبت شده است.")
+        return
+    if order.order_kind != OrderKind.PURCHASE.value:
+        await callback.message.answer("⚠️ فعال‌سازی دستی فقط برای خرید جدید قابل انجام است.")
+        return
+    if order.user is None or order.plan is None:
+        await callback.message.answer("❌ اطلاعات کاربر یا پلن سفارش کامل نیست.")
+        return
+
+    profile_id = (order.plan.controld_profile_id or settings.controld_profile_id or "").strip()
+    if not profile_id:
+        await callback.message.answer("❌ پروفایل Control D برای این پلن یا تنظیمات ربات ثبت نشده است.")
+        return
+
+    device_name = f"tg_user_{order.user.telegram_id}_{order.tracking_code}"
+    try:
+        device_data = await ControlDService(settings).create_device(
+            profile_id=profile_id,
+            device_name=device_name,
+        )
+    except (TimeoutError, asyncio.TimeoutError) as exc:
+        logger.warning("admin_manual_activation_timeout", order_id=order.id, error=str(exc))
+        await callback.message.answer("❌ ارتباط با Control D به دلیل timeout ناموفق بود. وضعیت سفارش تغییر نکرد.")
+        return
+    except Exception as exc:
+        logger.warning("admin_manual_activation_controld_failed", order_id=order.id, error=str(exc))
+        await callback.message.answer("❌ خطا در ساخت DNS روی Control D. وضعیت سفارش تغییر نکرد.")
+        return
+
+    if not device_data or not device_data.get("device_id") or not device_data.get("doh"):
+        # Error details have already been logged by create_device()
+        await callback.message.answer(
+            "❌ پاسخ Control D ناقص یا معتبر نبود.\n\n"
+            "لطفاً موارد زیر را چک کنید:\n"
+            "• اتصال به API Control D فعال است\n"
+            "• توکن API و Profile ID صحیح هستند\n"
+            "• لاگ‌های سرور را برای جزئیات بیشتر بررسی کنید\n\n"
+            "وضعیت سفارش تغییر نکرد."
+        )
+        return
+
+    now = datetime.now(timezone.utc)
+    expire_at = now + timedelta(days=order.plan.duration_days)
+    device_id = str(device_data["device_id"])
+    doh_link = str(device_data["doh"])
+    dot_link = str(device_data.get("dot") or "")
+    username = order.custom_username or device_name
+
+    await SubscriptionsRepository(session).create(
+        user_id=order.user.telegram_id,
+        plan_id=order.plan.id,
+        controld_device_id=device_id,
+        doh_link=doh_link,
+        expire_at=expire_at,
+        status="active",
+    )
+    service = await ServicesRepository(session).create(
+        user_id=order.user.id,
+        order_id=order.id,
+        plan_id=order.plan.id,
+        config_inventory_id=None,
+        username=username,
+        config_link=doh_link,
+        subscription_link=dot_link or None,
+        volume_gb=order.plan.volume_gb,
+        duration_days=order.plan.duration_days,
+        expire_at=expire_at,
+        status=VPNServiceStatus.ACTIVE.value,
+    )
+    service.controld_device_id = device_id
+
+    if order.payment is not None:
+        order.payment.status = PaymentStatus.APPROVED.value
+        order.payment.verified_at = order.payment.verified_at or now
+    order.status = OrderStatus.COMPLETED.value
+    order.paid_at = order.paid_at or now
+    order.completed_at = now
+    await session.commit()
+
+    user_delivery_failed = False
+    user_text = _manual_activation_user_message(
+        plan_title=order.plan.title,
+        duration_days=order.plan.duration_days,
+        expire_at=expire_at,
+        doh_link=doh_link,
+        dot_link=dot_link or None,
+    )
+    try:
+        await callback.bot.send_message(chat_id=order.user.telegram_id, text=user_text)
+    except Exception as exc:
+        user_delivery_failed = True
+        logger.warning(
+            "admin_manual_activation_user_notify_failed",
+            order_id=order.id,
+            user_telegram_id=order.user.telegram_id,
+            error=str(exc),
+        )
+
+    admin_text = (
+        f"✅ سفارش <b>{escape(order.tracking_code)}</b> با موفقیت فعال و تکمیل شد.\n\n"
+        f"👤 کاربر: <code>{order.user.telegram_id}</code>\n"
+        f"⚡ پلن: {escape(order.plan.title)}\n"
+        f"🌐 DoH:\n<code>{escape(doh_link)}</code>"
+    )
+    if dot_link:
+        admin_text += f"\n\n🔒 DoT:\n<code>{escape(dot_link)}</code>"
+    if user_delivery_failed:
+        admin_text += "\n\n⚠️ سرویس ساخته شد، اما ارسال پیام به کاربر ناموفق بود."
+
+    await callback.message.answer(admin_text)
+    refreshed_order = await OrdersRepository(session).get_with_details(order.id)
+    if refreshed_order is not None:
+        await _show_order_detail_panel(callback, refreshed_order)
 
 
 @router.message(Command("admin"))
@@ -861,8 +1015,8 @@ async def admin_payment_action(
                 await callback.answer("پرداخت تایید شد.")
                 # Inventory belongs only to new purchases. Renewals extend the existing
                 # service/config and must not trigger low-stock or empty-stock alerts.
-                if result.order_kind == OrderKind.PURCHASE.value and result.plan_id:
-                    await notify_admins_low_or_empty_inventory(callback.bot, session, result.plan_id)
+                # if result.order_kind == OrderKind.PURCHASE.value and result.plan_id:
+                #     await notify_admins_low_or_empty_inventory(callback.bot, session, result.plan_id)
             await _remove_admin_buttons(callback)
         elif callback_data.action == "reject":
             result = await payment_service.reject_payment(callback_data.payment_id)
@@ -1266,8 +1420,11 @@ async def add_plan_description(message: Message, state: FSMContext, session: Asy
     description = (message.text or "").strip()
     await state.update_data(description=None if description == "-" else description)
     await state.set_state(AdminAddPlanStates.duration_days)
-    await message.answer("مدت اعتبار تعرفه را به روز ارسال کنید. مثال: 30")
+    await message.answer("مدت اعتبار تعرفه را به ساعت ارسال کنید. مثال: 720 (برای ۳۰ روز) یا 2 (برای اکانت تست)")
 
+
+# Open bot/routers/admin.py
+# Locate and replace:
 
 @router.message(AdminAddPlanStates.duration_days)
 async def add_plan_duration(message: Message, state: FSMContext, session: AsyncSession, settings: Settings) -> None:
@@ -1275,11 +1432,41 @@ async def add_plan_duration(message: Message, state: FSMContext, session: AsyncS
         return
     value = _parse_positive_int(message.text)
     if value is None:
-        await message.answer("لطفاً یک عدد صحیح مثبت ارسال کنید.")
+        await message.answer("لطفاً یک عدد صحیح مثبت به ساعت ارسال کنید.")
         return
-    await state.update_data(duration_days=value)
-    await state.set_state(AdminAddPlanStates.volume_gb)
-    await message.answer("حجم تعرفه را به گیگ ارسال کنید. مثال: 10")
+        
+    await state.update_data(duration_hours=value)
+    
+    # Bypass volume_gb prompt entirely and jump straight to pricing
+    await state.set_state(AdminAddPlanStates.price)
+    await message.answer("قیمت تعرفه را به تومان ارسال کنید. مثال: 2100000")
+
+
+async def _save_add_plan(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    data = await state.get_data()
+    required = {"title", "duration_hours", "price", "sort_order"}
+    if not required.issubset(data):
+        await state.clear()
+        await _safe_edit_or_answer(callback, "اطلاعات تعرفه کامل نیست. دوباره تلاش کنید.")
+        return
+
+    # Create the plan with duration_hours and default volume to 0
+    plan = await PlansRepository(session).create(
+        title=str(data["title"]),
+        description=data.get("description"),
+        duration_hours=int(data["duration_hours"]),
+        volume_gb=0,  # DNS has no volume limit, default to 0
+        price=int(data["price"]),
+        sort_order=int(data["sort_order"]),
+        is_active=True,
+    )
+    await session.commit()
+    await state.clear()
+    if callback.message:
+        await callback.message.answer(
+            f"✅ تعرفه جدید ذخیره شد.\n\n{_format_plan_detail(plan, 0)}",
+            reply_markup=plan_detail_keyboard(plan),
+        )
 
 
 @router.message(AdminAddPlanStates.volume_gb)
@@ -1822,32 +2009,6 @@ async def admin_broadcast_confirm(message: Message, state: FSMContext, session: 
     await message.answer(f"📢 ارسال پیام همگانی تمام شد.\n✅ موفق: {success}\n❌ ناموفق: {failed}")
 
 
-async def _save_add_plan(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
-    data = await state.get_data()
-    required = {"title", "duration_days", "volume_gb", "price", "sort_order"}
-    if not required.issubset(data):
-        await state.clear()
-        await _safe_edit_or_answer(callback, "اطلاعات تعرفه کامل نیست. دوباره تلاش کنید.")
-        return
-
-    plan = await PlansRepository(session).create(
-        title=str(data["title"]),
-        description=data.get("description"),
-        duration_days=int(data["duration_days"]),
-        volume_gb=int(data["volume_gb"]),
-        price=int(data["price"]),
-        sort_order=int(data["sort_order"]),
-        is_active=True,
-    )
-    await session.commit()
-    await state.clear()
-    if callback.message:
-        await callback.message.answer(
-            f"✅ تعرفه جدید ذخیره شد.\n\n{_format_plan_detail(plan, 0)}",
-            reply_markup=plan_detail_keyboard(plan),
-        )
-
-
 async def _save_test_account(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
     data = await state.get_data()
     required = {"title", "config_link", "duration_hours", "max_claims"}
@@ -2277,15 +2438,20 @@ AFFILIATE_DEFAULT_TO_ROOT: {"فعال" if settings.affiliate_default_to_root els
 
 
 async def _show_sales_report(callback: CallbackQuery, session: AsyncSession) -> None:
-    row = await session.execute(
-        select(func.count(Order.id), func.coalesce(func.sum(Order.amount), 0)).where(
-            Order.status == "completed"
-        )
-    )
-    orders_count, revenue = row.one()
+    report = await ReportsRepository(session).get_sales_report()
     await _safe_edit_or_answer(
         callback,
-        f"📈 گزارش فروش\n\n🛒 سفارش‌های موفق: {int(orders_count or 0)}\n💵 فروش کل: {format_money(int(revenue or 0))} تومان",
+        f"""<b>📈 گزارش جامع فروش</b>
+
+<b>💵 فروش</b>
+امروز: <b>{format_money(report.today_sales)} تومان</b>
+این هفته: <b>{format_money(report.week_sales)} تومان</b>
+کل فروش: <b>{format_money(report.total_sales)} تومان</b>
+سفارش‌های موفق: <b>{format_money(report.completed_orders_count)}</b>
+
+<b>🛍 اشتراک‌ها</b>
+فعال: <b>{format_money(report.active_subscriptions_count)}</b>
+منقضی: <b>{format_money(report.expired_subscriptions_count)}</b>""",
         reply_markup=admin_sales_keyboard(),
     )
 
@@ -2427,38 +2593,6 @@ def _format_withdrawal_list_item(withdrawal: WalletWithdrawalRequest) -> str:
 روش دریافت: {format_withdrawal_destination_fa(withdrawal.destination_type)}
 شماره مقصد: {escape(mask_destination(withdrawal.destination_type, withdrawal.destination_number))}
 🗓 تاریخ: {format_datetime(withdrawal.created_at)}"""
-
-
-async def _show_plans(callback: CallbackQuery, session: AsyncSession, prefix: str = "") -> None:
-    plans = await PlansRepository(session).list_all()
-    if not plans:
-        text = f"""{prefix}📦 مدیریت تعرفه‌ها
-
-هنوز تعرفه‌ای ثبت نشده است.
-برای ساخت تعرفه جدید از دکمه «➕ افزودن تعرفه» استفاده کنید."""
-    else:
-        lines = [
-            f"{prefix}📦 مدیریت تعرفه‌ها",
-            "",
-            "از این بخش می‌توانید تعرفه‌ها را اضافه, ویرایش، فعال/غیرفعال یا حذف کنید.",
-            "برای ویرایش کامل، روی دکمه «⚙️ مدیریت» هر تعرفه بزنید.",
-            "",
-            "📋 لیست تعرفه‌ها:",
-        ]
-        for index, plan in enumerate(plans, start=1):
-            status = "🟢 فعال" if plan.is_active else "🔴 غیرفعال"
-            lines.append(
-                f"""
-{index}. {escape(plan.title)}
-📌 وضعیت: {status}
-📦 حجم: {plan.volume_gb} گیگ
-🗓 مدت: {plan.duration_days} روز
-💵 قیمت: {format_money(plan.price)} تومان
-🔢 ترتیب نمایش: {plan.sort_order}"""
-            )
-        text = "\n".join(lines)
-
-    await _safe_edit_or_answer(callback, text, reply_markup=plans_management_keyboard(plans))
 
 
 async def _show_test_accounts(callback: CallbackQuery, session: AsyncSession, prefix: str = "") -> None:
@@ -2674,12 +2808,12 @@ async def _show_order_detail_panel(callback: CallbackQuery, order: Order) -> Non
     
     builder = InlineKeyboardBuilder()
     if order.status == OrderStatus.PENDING_PAYMENT.value:
-        builder.button(text="✅ تکمیل دستی (Done)", callback_data=AdminOrderCallback(action="complete", order_id=order.id))
+        builder.button(text="✅ فعال‌سازی و تکمیل دستی", callback_data=f"admin_manual_activate:{order.id}")
         builder.button(text="🔴 لغو رزرو / منقضی", callback_data=AdminOrderCallback(action="cancel", order_id=order.id))
     elif order.status == OrderStatus.COMPLETED.value:
         builder.button(text="🔴 لغو سفارش / منقضی", callback_data=AdminOrderCallback(action="cancel", order_id=order.id))
     else:
-        builder.button(text="✅ فعال‌سازی و تکمیل دستی", callback_data=AdminOrderCallback(action="complete", order_id=order.id))
+        builder.button(text="✅ فعال‌سازی و تکمیل دستی", callback_data=f"admin_manual_activate:{order.id}")
         
     builder.button(text="🗑 حذف کامل سفارش", callback_data=AdminOrderCallback(action="delete", order_id=order.id))
     builder.button(text="↩️ بازگشت به لیست", callback_data=AdminOrderCallback(action="list"))
@@ -2867,24 +3001,21 @@ async def _guard_settings_message(message: Message, state: FSMContext, session: 
     return True
 
 
+# Open bot/routers/admin.py
+# Locate and replace these three functions:
+
 def _format_plan_detail(plan, available_count: int | None = None) -> str:
     status = "🟢 فعال" if plan.is_active else "🔴 غیرفعال"
-    if available_count is None:
-        inventory_status = "نامشخص"
-    elif available_count > 0:
-        inventory_status = f"✅ موجود | آماده فروش: {available_count}"
-    else:
-        inventory_status = "❌ ناموجود | آماده فروش: 0"
     description = plan.description or "-"
+    duration_text = format_duration_fa(plan.duration_hours)
+    
     return f"""📦 جزئیات تعرفه
 
 🆔 شناسه: {plan.id}
 📌 وضعیت تعرفه: {status}
-📦 وضعیت موجودی: {inventory_status}
 ⚡ عنوان: {escape(plan.title)}
 📝 توضیحات: {escape(description)}
-📦 حجم: {plan.volume_gb} گیگ
-🗓 مدت: {plan.duration_days} روز
+🗓 مدت: {duration_text}
 💵 قیمت: {format_money(plan.price)} تومان
 🔢 ترتیب نمایش: {plan.sort_order}
 
@@ -2893,16 +3024,50 @@ def _format_plan_detail(plan, available_count: int | None = None) -> str:
 
 def _format_plan_data_summary(data: dict) -> str:
     description = data.get("description") or "-"
+    hours = int(data.get("duration_hours") or 0)
+    duration_text = format_duration_fa(hours)
+    
     return f"""🧾 خلاصه تعرفه جدید
 
 ⚡ عنوان: {escape(str(data["title"]))}
 📝 توضیحات: {escape(str(description))}
-📦 حجم: {data["volume_gb"]} گیگ
-🗓 مدت: {data["duration_days"]} روز
+🗓 مدت: {duration_text}
 💵 قیمت: {format_money(int(data["price"]))} تومان
 🔢 ترتیب نمایش: {data["sort_order"]}
 
 آیا ذخیره شود؟"""
+
+
+async def _show_plans(callback: CallbackQuery, session: AsyncSession, prefix: str = "") -> None:
+    plans = await PlansRepository(session).list_all()
+    if not plans:
+        text = f"""{prefix}📦 مدیریت تعرفه‌ها
+
+هنوز تعرفه‌ای ثبت نشده است.
+برای ساخت تعرفه جدید از دکمه «➕ افزودن تعرفه» استفاده کنید."""
+    else:
+        lines = [
+            f"{prefix}📦 مدیریت تعرفه‌ها",
+            "",
+            "از این بخش می‌توانید تعرفه‌ها را اضافه, ویرایش، فعال/غیرفعال یا حذف کنید.",
+            "برای ویرایش کامل، روی دکمه «⚙️ مدیریت» هر تعرفه بزنید.",
+            "",
+            "📋 لیست تعرفه‌ها:",
+        ]
+        for index, plan in enumerate(plans, start=1):
+            status = "🟢 فعال" if plan.is_active else "🔴 غیرفعال"
+            duration_text = format_duration_fa(plan.duration_hours)
+            lines.append(
+                f"""
+{index}. {escape(plan.title)}
+📌 وضعیت: {status}
+🗓 مدت: {duration_text}
+💵 قیمت: {format_money(plan.price)} تومان
+🔢 ترتیب نمایش: {plan.sort_order}"""
+            )
+        text = "\n".join(lines)
+
+    await _safe_edit_or_answer(callback, text, reply_markup=plans_management_keyboard(plans))
 
 
 def _format_test_account_detail(account) -> str:
@@ -2958,29 +3123,74 @@ def _format_service_detail(service) -> str:
 {escape(service.subscription_link or "-")}"""
 
 
+# Open bot/routers/admin.py
+# Replace your _approved_message helper with this version:
+
 def _approved_message(result: ApprovedPaymentResult) -> str:
     if result.waiting_inventory:
-        return "پرداخت شما تایید شد، اما موجودی سرویس انتخاب‌شده به پایان رسیده است. پشتیبانی به‌زودی سرویس شما را ارسال می‌کند."
+        return "پرداخت شما تایید شد. پشتیبانی به‌زودی اطلاعات اشتراک شما را ارسال می‌کند."
+        
+    hours = result.duration_days
+    calculated_days = hours // 24 if hours >= 24 and hours % 24 == 0 else hours
+    unit = "روز" if hours >= 24 and hours % 24 == 0 else "ساعت"
+
     if result.order_kind == OrderKind.RENEWAL.value:
         expire_at = _format_datetime(result.new_expire_at)
-        return f"""✅ تمدید سرویس شما با موفقیت انجام شد
+        return f"""✅ <b>تمدید اشتراک شما با موفقیت انجام شد</b>
 
-👤 نام کاربری: {escape(result.service_username)}
-⚡ پلن تمدید: {escape(result.plan_title)}
-📦 حجم افزوده: {result.volume_gb} گیگ
-🗓 اعتبار افزوده: {result.duration_days} روز
-📅 تاریخ انقضای جدید: {expire_at}"""
+👤 <b>نام دستگاه:</b> <code>{escape(result.service_username)}</code>
+⚡ <b>پلن تمدید:</b> {escape(result.plan_title)}
+🗓 <b>اعتبار افزوده:</b> {calculated_days} {unit}
+📅 <b>تاریخ انقضای جدید:</b> {expire_at}"""
 
-    config_line = f"\n🔗 کانفیگ شما:\n{escape(result.config_link)}" if result.config_link else ""
-    subscription_line = f"\n\n🔗 لینک اشتراک:\n{escape(result.subscription_link)}" if result.subscription_link else ""
-    return f"""✅ پرداخت شما تایید شد
+    # --- ADVANCED ENDPOINTS DISPLAY FOR NEW PURCHASES ---
+    device_name = escape(result.service_username)
+    calculated_duration = f"{calculated_days} {unit}"
+    resolver_id = result.resolver_id or (result.config_link.split("/")[-1] if result.config_link else "ثبت نشده")
+    stamp = result.stamp or "ثبت نشده"
 
-✅ سرویس شما با موفقیت ساخته شد
+    return f"""✅ <b>اشتراک شما با موفقیت ساخته شد!</b>
 
-👤 نام کاربری: {escape(result.service_username)}
-⚡ پلن: {escape(result.plan_title)}
-📦 حجم: {result.volume_gb} گیگ
-🗓 اعتبار: {result.duration_days} روز{config_line}{subscription_line}"""
+👤 <b>نام سرویس:</b> <code>{device_name}</code>
+🗓 <b>اعتبار:</b> {calculated_duration}
+
+🔐 <b>SECURE DNS (Encrypted)</b>
+
+🆔 <b>Resolver ID:</b>
+<code>{resolver_id}</code>
+
+🌐 <b>DNS-over-HTTPS/3:</b>
+<code>{result.config_link}</code>
+
+🔒 <b>DNS-over-TLS/DoQ:</b>
+<code>{result.subscription_link}</code>
+
+🖥 <b>Bootstrap IPs:</b>
+<code>76.76.2.22</code> | <code>2606:1a40::22</code>
+
+🔗 <b>DNS Stamp:</b>
+<code>{stamp}</code>
+
+⚠️ <i>جهت استفاده در برنامه‌هایی مانند v2rayNG، NekoBox یا Hiddify از DNS Stamp یا لینک‌های فوق استفاده کنید.</i>"""
+
+
+def _manual_activation_user_message(
+    *,
+    plan_title: str,
+    duration_days: int,
+    expire_at: datetime,
+    doh_link: str,
+    dot_link: str | None,
+) -> str:
+    dot_section = f"\n\n🔒 آدرس DoT شما:\n<code>{escape(dot_link)}</code>" if dot_link else ""
+    return f"""✅ اشتراک DNS شما با موفقیت فعال شد
+
+⚡ پلن: {escape(plan_title)}
+🗓 اعتبار: {duration_days} روز
+📅 تاریخ انقضا: {_format_datetime(expire_at)}
+
+🌐 دی‌ان‌اس DoH شما:
+<code>{escape(doh_link)}</code>{dot_section}"""
 
 
 def _format_datetime(value: datetime | None) -> str:
@@ -3050,4 +3260,15 @@ async def _remove_admin_buttons(callback: CallbackQuery) -> None:
         except Exception:
             pass
 
+# Open bot/routers/admin.py
+# Paste this helper function at the top of the file (e.g., right under imports):
 
+def format_duration_fa(hours: int) -> str:
+    """
+    Dynamically formats hours into readable Persian text.
+    Shows days if divisible by 24, otherwise displays hours.
+    """
+    if hours >= 24 and hours % 24 == 0:
+        days = hours // 24
+        return f"{days} روز"
+    return f"{hours} ساعت"

@@ -58,7 +58,16 @@ class UsersRepository:
         return list(result.all())
 
     async def search(self, query: str, limit: int = 10) -> list[User]:
+        # Enforce reasonable limits to prevent full-table scans
+        if limit > 100:
+            limit = 100
+        if limit < 1:
+            limit = 1
+        
         normalized = query.strip().removeprefix("@")
+        if not normalized or len(normalized) < 2:
+            return []
+        
         conditions = [
             User.telegram_username.ilike(f"%{normalized}%"),
             User.phone_number.ilike(f"%{normalized}%"),

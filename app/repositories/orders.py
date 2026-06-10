@@ -19,6 +19,7 @@ class OrdersRepository:
                 joinedload(Order.user),
                 joinedload(Order.plan),
                 joinedload(Order.payment),
+                joinedload(Order.vpn_service),
                 joinedload(Order.renewal_service),
                 joinedload(Order.config_inventory_item),
             )
